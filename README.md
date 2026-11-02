@@ -87,6 +87,15 @@ uv run jmp match-visual path/to/base.mkv path/to/donor.mkv -w .jmp/visual-match
 
 Notes: [docs/visual-matching.md](docs/visual-matching.md).
 
+### Alignment
+
+Escalate sync hypotheses (already synced → offset → speed → piecewise) for a base/donor pair:
+
+```bash
+uv run jmp align path/to/base.mkv path/to/donor.mkv -w .jmp/alignment
+uv run jmp align path/to/base.mkv path/to/donor.mkv --no-video
+```
+
 ## Development
 
 ```bash
