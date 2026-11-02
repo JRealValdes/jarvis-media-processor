@@ -167,31 +167,39 @@ def _full_span_segment(
     base_duration: float | None,
     donor_duration: float | None,
 ) -> AlignmentSegment:
-    if pairs:
+    """Build one segment covering the valid overlap of base and donor under the model.
+
+    Model: ``donor ≈ speed * base + offset``. Negative offsets leave leading base
+    silence; positive offsets leave trailing base silence — without time-stretching
+    the mapped region.
+    """
+    model_speed = speed if speed > 0 else 1.0
+
+    if base_duration is not None:
+        base_lo = 0.0
+        base_hi = float(base_duration)
+        # Restrict to donor times inside [0, donor_duration] when known.
+        donor_lo = 0.0
+        donor_hi = float(donor_duration) if donor_duration is not None else float("inf")
+        base_start = max(base_lo, (donor_lo - offset) / model_speed)
+        base_end = min(base_hi, (donor_hi - offset) / model_speed)
+        if base_end < base_start:
+            base_start = base_lo
+            base_end = base_lo
+        donor_start = float(model_speed * base_start + offset)
+        donor_end = float(model_speed * base_end + offset)
+        if donor_duration is not None:
+            donor_start = max(0.0, min(donor_start, float(donor_duration)))
+            donor_end = max(0.0, min(donor_end, float(donor_duration)))
+    elif pairs:
         base_start = min(p.base_time for p in pairs)
         base_end = max(p.base_time for p in pairs)
-        donor_start = min(p.donor_time for p in pairs)
-        donor_end = max(p.donor_time for p in pairs)
+        donor_start = float(model_speed * base_start + offset)
+        donor_end = float(model_speed * base_end + offset)
     else:
-        base_start, base_end = 0.0, base_duration or 0.0
-        donor_start, donor_end = 0.0, donor_duration or 0.0
-
-    if base_duration is not None:
-        base_start, base_end = 0.0, base_duration
-    if donor_duration is not None and speed == 1.0:
-        # For pure offset, donor span follows duration when known.
-        donor_start = max(0.0, offset) if offset > 0 else 0.0
-        if donor_duration is not None:
-            donor_end = donor_duration
-
-    # Map endpoints with the model when durations known.
-    if base_duration is not None:
-        base_start, base_end = 0.0, float(base_duration)
-        donor_start = float(speed * base_start + offset)
-        donor_end = float(speed * base_end + offset)
-        if donor_duration is not None:
-            donor_start = max(0.0, min(donor_start, donor_duration))
-            donor_end = max(0.0, min(donor_end, donor_duration))
+        base_start, base_end = 0.0, 0.0
+        donor_start = max(0.0, float(offset))
+        donor_end = donor_start
 
     if base_end <= base_start:
         base_end = base_start + 1e-3
@@ -203,7 +211,7 @@ def _full_span_segment(
         base_end=base_end,
         donor_start=donor_start,
         donor_end=donor_end,
-        speed=speed,
+        speed=model_speed,
         offset_seconds=offset,
         confidence=confidence,
         reliable=confidence >= 0.5,

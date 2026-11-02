@@ -72,30 +72,134 @@ def _cluster_by_offset(
     return clusters
 
 
-def _segment_from_cluster(cluster: list[TimePair]) -> AlignmentSegment:
+def _cluster_model(cluster: list[TimePair]) -> tuple[float, float, float, bool, float, float]:
+    """Return ``(speed, offset, confidence, reliable, base_min, base_max)``."""
     base_times = [p.base_time for p in cluster]
     donor_times = [p.donor_time for p in cluster]
     offset = float(np.mean([d - b for b, d in zip(base_times, donor_times, strict=True)]))
     speed = 1.0
     if len(cluster) >= 2:
-        b0, b1 = base_times[0], base_times[-1]
-        d0, d1 = donor_times[0], donor_times[-1]
+        b0, b1 = min(base_times), max(base_times)
+        # Use endpoints in time order for a stable local speed estimate.
+        ordered = sorted(zip(base_times, donor_times, strict=True), key=lambda x: x[0])
+        d0, d1 = ordered[0][1], ordered[-1][1]
         if abs(b1 - b0) > 1e-6:
             speed = float((d1 - d0) / (b1 - b0))
             if speed <= 0:
                 speed = 1.0
             offset = float(d0 - speed * b0)
     conf = min(1.0, 0.45 + 0.2 * len(cluster))
-    return AlignmentSegment(
-        base_start=min(base_times),
-        base_end=max(base_times) + 1e-3,
-        donor_start=min(donor_times),
-        donor_end=max(donor_times) + 1e-3,
-        speed=speed,
-        offset_seconds=offset,
-        confidence=conf,
-        reliable=len(cluster) >= 2 or conf >= 0.6,
-    )
+    reliable = len(cluster) >= 2 or conf >= 0.6
+    return speed, offset, conf, reliable, min(base_times), max(base_times)
+
+
+def _map_base_window_to_donor(
+    base_start: float,
+    base_end: float,
+    *,
+    speed: float,
+    offset: float,
+    donor_duration: float | None,
+) -> tuple[float, float, float, float]:
+    """Map a base window through the local model and clamp to the donor timeline."""
+    model_speed = speed if speed > 0 else 1.0
+    donor_start = float(model_speed * base_start + offset)
+    donor_end = float(model_speed * base_end + offset)
+    if donor_duration is not None:
+        # Shrink the base window so donor stays inside [0, donor_duration].
+        if donor_start < 0.0:
+            base_start = (0.0 - offset) / model_speed
+            donor_start = 0.0
+        if donor_end > donor_duration:
+            base_end = (donor_duration - offset) / model_speed
+            donor_end = float(donor_duration)
+        if donor_end < donor_start:
+            donor_end = donor_start
+        if base_end < base_start:
+            base_end = base_start
+    return base_start, base_end, donor_start, donor_end
+
+
+def _expand_clusters_to_segments(
+    clusters: list[list[TimePair]],
+    *,
+    base_duration: float | None,
+    donor_duration: float | None,
+    min_span: float = 0.05,
+) -> list[AlignmentSegment]:
+    """Turn offset clusters into continuous base spans (midpoints between clusters).
+
+    Does not invent coverage before the first or after the last evidence anchor.
+    Isolated point clusters still get a short padded window so reconstruction can
+    place audio instead of skipping 1 ms stubs.
+    """
+    if not clusters:
+        return []
+
+    models = [_cluster_model(c) for c in clusters]
+    ordered = sorted(models, key=lambda m: m[4])  # base_min
+    segments: list[AlignmentSegment] = []
+
+    for index, (speed, offset, conf, reliable, bmin, bmax) in enumerate(ordered):
+        if index == 0:
+            base_start = bmin
+        else:
+            prev_bmax = ordered[index - 1][5]
+            base_start = 0.5 * (prev_bmax + bmin)
+
+        if index == len(ordered) - 1:
+            base_end = bmax
+        else:
+            next_bmin = ordered[index + 1][4]
+            base_end = 0.5 * (bmax + next_bmin)
+
+        if base_end - base_start < min_span:
+            pad = max(min_span, 0.5) / 2.0
+            base_start = max(0.0, base_start - pad)
+            base_end = base_end + pad
+            if base_duration is not None:
+                base_end = min(base_end, float(base_duration))
+
+        base_start, base_end, donor_start, donor_end = _map_base_window_to_donor(
+            base_start,
+            base_end,
+            speed=speed,
+            offset=offset,
+            donor_duration=donor_duration,
+        )
+        if base_end <= base_start:
+            base_end = base_start + 1e-3
+        if donor_end <= donor_start:
+            donor_end = donor_start + 1e-3
+
+        segments.append(
+            AlignmentSegment(
+                base_start=base_start,
+                base_end=base_end,
+                donor_start=donor_start,
+                donor_end=donor_end,
+                speed=speed,
+                offset_seconds=offset,
+                confidence=conf,
+                reliable=reliable,
+            )
+        )
+    return segments
+
+
+def _merge_intervals(covered: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping/adjacent half-open coverage intervals."""
+    if not covered:
+        return []
+    ordered = sorted((min(a, b), max(a, b)) for a, b in covered)
+    merged: list[tuple[float, float]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1e-9:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _gaps_on_timeline(
@@ -106,30 +210,23 @@ def _gaps_on_timeline(
     min_gap: float,
     reason_prefix: str,
 ) -> list[TimelineInterval]:
+    """Return uncovered gaps on ``[0, duration]`` given covered intervals."""
     if duration is None or duration <= 0:
         return []
     intervals: list[TimelineInterval] = []
-    ordered = sorted(covered, key=lambda x: x[0])
-    # Point samples only cover instants; treat each as a zero-width mark and
-    # report gaps between distinct marks / edges.
-    marks: list[float] = []
-    for start, end in ordered:
-        marks.append(start)
-        if end - start > 1e-6:
-            marks.append(end)
-    marks = sorted(set(round(m, 6) for m in marks))
+    merged = _merge_intervals(covered)
     cursor = 0.0
-    for mark in marks:
-        if mark - cursor >= min_gap:
+    for start, end in merged:
+        if start - cursor >= min_gap:
             intervals.append(
                 TimelineInterval(
                     start=cursor,
-                    end=mark,
+                    end=start,
                     timeline=timeline,
                     reason=f"{reason_prefix}_gap",
                 )
             )
-        cursor = max(cursor, mark)
+        cursor = max(cursor, end)
     if duration - cursor >= min_gap:
         intervals.append(
             TimelineInterval(
@@ -247,7 +344,11 @@ def build_piecewise_alignment(
         )
 
     clusters = _cluster_by_offset(chain, offset_tolerance=offset_tolerance)
-    segments = [_segment_from_cluster(cluster) for cluster in clusters]
+    segments = _expand_clusters_to_segments(
+        clusters,
+        base_duration=base_duration,
+        donor_duration=donor_duration,
+    )
 
     missing_base = _gaps_on_timeline(
         [(s.base_start, s.base_end) for s in segments],

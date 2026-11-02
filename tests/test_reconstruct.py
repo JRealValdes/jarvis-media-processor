@@ -47,6 +47,46 @@ def test_plan_skips_tiny_segments() -> None:
     assert placements[0].base_start == 1.0
 
 
+def test_reconstruct_negative_offset_places_leading_silence(tmp_path: Path) -> None:
+    sr = 8_000
+    donor = _tone(sr, 1.0, 440.0)
+    donor_wav = tmp_path / "donor.wav"
+    write_pcm16_wav(donor_wav, donor, sample_rate=sr)
+
+    # donor ≈ base - 1.0  ⇒ tone fills base 1..2
+    alignment = AlignmentDocument(
+        strategy=SyncStrategyLevel.CONSTANT_OFFSET,
+        confidence=0.9,
+        global_offset_seconds=-1.0,
+        global_speed=1.0,
+        segments=[
+            AlignmentSegment(
+                base_start=1.0,
+                base_end=2.0,
+                donor_start=0.0,
+                donor_end=1.0,
+                offset_seconds=-1.0,
+                confidence=0.9,
+            )
+        ],
+    )
+    out = tmp_path / "out.wav"
+    reconstruct_from_wav(
+        donor_wav,
+        alignment,
+        out,
+        base_duration=3.0,
+        crossfade_seconds=0.0,
+    )
+    rendered, _ = read_pcm16_wav(out)
+    first = float(np.sqrt(np.mean(rendered[:sr] ** 2)))
+    mid = float(np.sqrt(np.mean(rendered[sr : 2 * sr] ** 2)))
+    last = float(np.sqrt(np.mean(rendered[2 * sr :] ** 2)))
+    assert first < 0.05
+    assert mid > 0.1
+    assert last < 0.05
+
+
 def test_reconstruct_constant_offset_no_shift(tmp_path: Path) -> None:
     sr = 8_000
     # Donor: 1s silence + 1s tone
