@@ -12,6 +12,12 @@ from jarvis_media_processor.alignment.activity_sync import (
     estimate_offset_crosscorr,
     estimate_speed_offset_activity,
 )
+from jarvis_media_processor.alignment.audio_refine import (
+    AudioOffsetRefinement,
+    apply_offset_delta,
+    estimate_fine_audio_offset,
+    refine_alignment_audio_offset,
+)
 from jarvis_media_processor.alignment.estimate import (
     estimate_alignment,
     estimate_alignment_visual_first,
@@ -31,9 +37,11 @@ __all__ = [
     "ActivitySyncResult",
     "AlignmentDocument",
     "AlignmentSegment",
+    "AudioOffsetRefinement",
     "SyncStrategyLevel",
     "TimelineInterval",
     "activity_time_pairs",
+    "apply_offset_delta",
     "build_piecewise_alignment",
     "detect_alignment",
     "detect_alignment_from_artifacts",
@@ -41,7 +49,9 @@ __all__ = [
     "detect_alignment_from_wavs",
     "estimate_alignment",
     "estimate_alignment_visual_first",
+    "estimate_fine_audio_offset",
     "estimate_offset_crosscorr",
     "estimate_speed_offset_activity",
+    "refine_alignment_audio_offset",
     "select_monotonic_correspondences",
 ]

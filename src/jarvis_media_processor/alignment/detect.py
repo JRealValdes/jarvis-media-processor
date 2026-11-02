@@ -13,6 +13,7 @@ from jarvis_media_processor.alignment.activity_sync import (
     activity_time_pairs,
     estimate_speed_offset_activity,
 )
+from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
     estimate_alignment,
     estimate_alignment_visual_first,
@@ -60,6 +61,9 @@ def detect_alignment_from_artifacts(
     inlier_tolerance: float = 0.12,
     visual_inlier_tolerance: float = 1.5,
     min_visual_pairs: int = 8,
+    audio_refine_window_seconds: float = 2.0,
+    audio_refine_min_score: float = 0.05,
+    refine_audio_offset: bool = True,
 ) -> AlignmentDocument:
     """Run visual-first escalating sync using precomputed analysis artifacts."""
     audio_pairs = landmark_time_pairs(base_audio.landmarks, donor_audio.landmarks)
@@ -82,6 +86,20 @@ def detect_alignment_from_artifacts(
             donor_duration=donor_audio.duration_seconds,
             inlier_tolerance=inlier_tolerance,
         )
+    if refine_audio_offset and (visual_matches or activity_pairs):
+        doc, refinement = refine_alignment_audio_offset(
+            doc,
+            base_audio,
+            donor_audio,
+            window_seconds=audio_refine_window_seconds,
+            min_score=audio_refine_min_score,
+        )
+        if refinement.applied:
+            logger.info(
+                "Audio fine-offset Δ=%+.3fs score=%.3f",
+                refinement.delta_seconds,
+                refinement.score,
+            )
     doc.base_path = base_path or base_audio.source_path
     doc.donor_path = donor_path or donor_audio.source_path
     return doc
@@ -180,6 +198,9 @@ def detect_alignment(
         inlier_tolerance=cfg.alignment_inlier_tolerance_seconds,
         visual_inlier_tolerance=cfg.alignment_visual_inlier_tolerance_seconds,
         min_visual_pairs=cfg.alignment_visual_min_pairs,
+        audio_refine_window_seconds=cfg.alignment_audio_refine_window_seconds,
+        audio_refine_min_score=cfg.alignment_audio_refine_min_score,
+        refine_audio_offset=bool(visual_matches or activity_pairs),
     )
 
     out = work / "alignment.json"
