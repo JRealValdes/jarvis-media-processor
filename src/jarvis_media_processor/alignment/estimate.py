@@ -227,6 +227,8 @@ def estimate_alignment(
     min_inlier_ratio: float = 0.85,
     already_synced_tolerance: float = 0.08,
     speed_tolerance: float = 0.03,
+    speed_min: float = 0.85,
+    speed_max: float = 1.2,
 ) -> AlignmentDocument:
     """Escalate sync hypotheses from evidence pairs.
 
@@ -302,7 +304,12 @@ def estimate_alignment(
             },
         )
 
-    speed_fit = fit_speed_offset(pairs, inlier_tolerance=inlier_tolerance)
+    speed_fit = fit_speed_offset(
+        pairs,
+        inlier_tolerance=inlier_tolerance,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
     if (
         speed_fit
         and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
@@ -372,6 +379,9 @@ def estimate_alignment_visual_first(
     min_visual_pairs: int = 8,
     visual_min_inlier_ratio: float = 0.55,
     audio_downweight: float = 0.2,
+    speed_min: float = 0.85,
+    speed_max: float = 1.2,
+    speed_tolerance: float = 0.03,
 ) -> AlignmentDocument:
     """Prefer a visual timing model; do not let weak audio override it.
 
@@ -393,7 +403,9 @@ def estimate_alignment_visual_first(
             donor_duration=donor_duration,
             inlier_tolerance=visual_inlier_tolerance,
             min_inlier_ratio=visual_min_inlier_ratio,
-            speed_tolerance=0.02,
+            speed_tolerance=speed_tolerance,
+            speed_min=speed_min,
+            speed_max=speed_max,
         )
         if visual_doc.strategy in _GLOBAL_STRATEGIES:
             visual_doc.notes = [

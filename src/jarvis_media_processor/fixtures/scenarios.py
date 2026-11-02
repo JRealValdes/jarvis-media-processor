@@ -146,7 +146,7 @@ def scenario_constant_speed() -> GroundTruth:
 
 
 def scenario_local_length_drift() -> GroundTruth:
-    """Middle scene longer on donor — progressive desync (Spider-Man-like hard case)."""
+    """Middle scene longer on donor — progressive local desync (hard edit case)."""
     # Base scenes: 2+2+2. Donor: 2 + 3 + 2 (middle elongated by 1s).
     extra = 1.0
     donor_duration = _BASE_DURATION + extra

@@ -194,12 +194,14 @@ def test_fixture_already_synced_expectation() -> None:
 
 
 def test_visual_first_accepts_speed_despite_conflicting_audio() -> None:
-    # Visual: donor ≈ 0.96 * base - 28 (Spider-Man-like).
+    # Generic hard case: mild timeline compression + large constant offset.
+    speed = 0.96
+    offset = -28.0
     visual = [
-        TimePair(float(t), 0.96 * t - 28.0, 0.9, "video_match")
+        TimePair(float(t), speed * t + offset, 0.9, "video_match")
         for t in range(40, 500, 10)
     ]
-    # Conflicting audio Cartesian noise around a wrong ~-50s offset.
+    # Conflicting acoustic noise around a wrong constant offset.
     audio = [
         TimePair(float(t), float(t) - 50.0, 0.95, "audio_landmark")
         for t in (50, 100, 150, 200, 250)
@@ -217,7 +219,7 @@ def test_visual_first_accepts_speed_despite_conflicting_audio() -> None:
     )
     assert doc.strategy == SyncStrategyLevel.CONSTANT_SPEED
     assert doc.global_speed is not None
-    assert abs(doc.global_speed - 0.96) < 0.03
+    assert abs(doc.global_speed - speed) < 0.03
     assert doc.evidence.get("fusion") == "visual_only_global"
     assert any("Visual-first" in n for n in doc.notes)
 

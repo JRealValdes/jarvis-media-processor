@@ -75,6 +75,7 @@ def test_crosscorr_recovers_negative_offset() -> None:
 
 
 def test_speed_grid_recovers_mild_compression() -> None:
+    # Arbitrary mild compression within the generic speed search band.
     speed = 0.96
     offset = -5.0
     base_idx = [20, 40, 60, 80, 100]
@@ -84,9 +85,9 @@ def test_speed_grid_recovers_mild_compression() -> None:
     result = estimate_speed_offset_activity(
         base,
         donor,
-        speed_min=0.92,
-        speed_max=1.05,
-        speed_steps=14,
+        speed_min=0.85,
+        speed_max=1.2,
+        speed_steps=36,
     )
     assert abs(result.speed - speed) < 0.05
     assert abs(result.offset_seconds - offset) < 3.0

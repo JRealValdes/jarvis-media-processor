@@ -83,9 +83,9 @@ def estimate_speed_offset_activity(
     base: ActivityEnvelope,
     donor: ActivityEnvelope,
     *,
-    speed_min: float = 0.92,
-    speed_max: float = 1.08,
-    speed_steps: int = 17,
+    speed_min: float = 0.85,
+    speed_max: float = 1.2,
+    speed_steps: int = 36,
 ) -> ActivitySyncResult:
     """Grid search over mild speed changes, then cross-correlate.
 
