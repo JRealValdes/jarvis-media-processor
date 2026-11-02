@@ -72,8 +72,8 @@ def test_curve_walk_finds_inserted_ad_block() -> None:
     )
 
 
-def test_curve_lock_frame_confirm_rejects_lookalike() -> None:
-    """Derivative lock must fail when frame_confirm says pictures differ."""
+def test_curve_lock_ignores_failed_frame_confirm() -> None:
+    """Initial lock is curve-based; failed pHash must not block cross-encode."""
     base, donor, _ = _donor_with_ad_block()
     result = walk_activity_curves(
         base,
@@ -81,10 +81,14 @@ def test_curve_lock_frame_confirm_rejects_lookalike() -> None:
         half_window=6.0,
         hop_seconds=2.0,
         min_score=0.25,
+        break_score=0.18,
+        confirm_seconds=4.0,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=80.0,
         frame_confirm=lambda _b, _d: False,
     )
-    assert result.locks == []
-    assert "no initial lock" in " ".join(result.notes).lower()
+    assert result.locks, "expected curve lock"
+    assert result.unrelated_donor_intervals, "expected surplus ad span"
 
 
 def test_clean_envelopes_have_no_surplus() -> None:

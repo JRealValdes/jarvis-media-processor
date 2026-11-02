@@ -165,10 +165,12 @@ def find_initial_lock(
 ) -> CurveLock | None:
     """Find the first base↔donor coincidence via chronological curve search.
 
-    Phase 1 scores activity derivatives; phase 2 optionally confirms with
-    ``frame_confirm(base_t, donor_t)`` (actual frame content) to reject
-    lookalike curves. Happy alignments emerge as early hits of the same search.
+    Locks on activity derivatives (cross-encode safe). Frame confirmation for
+    picture identity lives in ``match_frames_two_phase``; ``frame_confirm`` is
+    accepted for API compatibility but not required to accept a curve lock —
+    requiring pHash here preferred late false locks on grade-mismatched pairs.
     """
+    _ = frame_confirm
     period = float(np.median([base.sample_period, donor.sample_period])) or 1.0
     hop = max(period, 2.0)
     base_start = float(base.times[0]) + half_window
@@ -190,10 +192,10 @@ def find_initial_lock(
             hop=hop,
             min_score=min_score * 0.85,
             confirm_seconds=max(half_window, 8.0),
-            frame_confirm=frame_confirm,
+            frame_confirm=None,
         ):
             return None
-        refined = _backwards_refine_lock(
+        return _backwards_refine_lock(
             base,
             donor,
             lock,
@@ -202,11 +204,6 @@ def find_initial_lock(
             hop=hop,
             min_score=min_score * 0.8,
         )
-        if frame_confirm is not None and not frame_confirm(
-            refined.base_time, refined.donor_time
-        ):
-            return None
-        return refined
 
     def _best_of(candidates: list[CurveLock]) -> CurveLock | None:
         if not candidates:
@@ -247,8 +244,7 @@ def find_initial_lock(
         if r not in radii:
             radii.append(r)
 
-    # Ring 0 — donor head across chronological base times (start↔start and
-    # missing open credits). Best-per-speed avoids weak early false locks.
+    # Ring 0 — donor head across chronological base times.
     for speed in speed_candidates:
         best: CurveLock | None = None
         for base_t in anchors:
@@ -272,8 +268,7 @@ def find_initial_lock(
         if confirmed is not None:
             return confirmed
 
-    # Later rings — chronological base × expanding offset (leading ads when
-    # base_t is early; mid-file coincidences otherwise).
+    # Later rings — chronological base × expanding offset.
     for base_t in anchors:
         for radius in radii:
             offsets = [0.0] if radius == 0 else [radius, -radius]
@@ -416,13 +411,18 @@ def walk_activity_curves(
     missing_base: list[TimelineInterval] = []
 
     # Head gaps implied by the first coincidence (after backwards refine).
-    # Ignore the unavoidable half-window analysis floor so a start-aligned
-    # lock does not look like a leading gap.
+    # Only when the lock itself sits near a timeline head — a mid-file lock
+    # must not invent a multi-minute "leading" gap.
     head_base = float(base.times[0])
     head_donor = float(donor.times[0])
     base_floor = head_base + half_window
     donor_floor = head_donor + half_window
-    if lock.base_time - base_floor >= missing_base_fill_seconds:
+    lock_near_base_head = lock.base_time - base_floor <= max_offset_seconds * 0.25
+    lock_near_donor_head = lock.donor_time - donor_floor <= half_window * 2
+    if (
+        lock_near_donor_head
+        and lock.base_time - base_floor >= missing_base_fill_seconds
+    ):
         missing_base.append(
             TimelineInterval(
                 start=head_base,
@@ -435,7 +435,10 @@ def walk_activity_curves(
             f"Leading missing base 0-{lock.base_time:.1f}s "
             "(donor starts matching later; fill from base track 0)."
         )
-    if lock.donor_time - donor_floor >= min_surplus_seconds:
+    if (
+        lock_near_base_head
+        and lock.donor_time - donor_floor >= min_surplus_seconds
+    ):
         unrelated.append(
             TimelineInterval(
                 start=head_donor,
@@ -451,14 +454,17 @@ def walk_activity_curves(
 
     speed = lock.speed
     offset = lock.offset_seconds
+    anchor_offset = lock.offset_seconds
     base_t = lock.base_time
     base_end = float(base.times[-1]) - half_window
     donor_end = float(donor.times[-1])
     donor_start = float(donor.times[0])
     bad_run = 0.0
     hop = max(hop_seconds, period)
+    max_offset_drift = hop  # keep the lock map; do not accumulate phase slip
     # Adaptive floor: break when score falls well below recent good tracking.
-    good_ema = max(lock.score, min_score)
+    # Seed from the confirm stretch, not the single lock peak (often low).
+    good_ema = max(lock.score, min_score, break_score + 0.15)
 
     while base_t <= base_end:
         donor_t = speed * base_t + offset
@@ -484,11 +490,14 @@ def walk_activity_curves(
             half_window=half_window,
             period=period,
         )
-        # Mild ±hop only — wider slips alias periodic activity and hide ads.
+        # Mild ±hop only, clamped to the last solid lock offset so refine
+        # cannot slowly walk away from a good map and invent surplus.
         best_off = offset
         best_sc = score
         for delta in (-hop, 0.0, hop):
             trial_off = offset + delta
+            if abs(trial_off - anchor_offset) > max_offset_drift:
+                continue
             trial_d = speed * base_t + trial_off
             if trial_d < donor_start - 1 or trial_d > donor_end + 1:
                 continue
@@ -505,25 +514,33 @@ def walk_activity_curves(
                 best_sc = sc
                 best_off = trial_off
         score = best_sc
-        offset = best_off
 
-        track_floor = max(break_score, good_ema * 0.65)
+        track_floor = max(break_score, good_ema * 0.55)
         if score >= track_floor:
-            good_ema = 0.85 * good_ema + 0.15 * score
+            offset = best_off
+            good_ema = 0.85 * good_ema + 0.15 * max(score, good_ema)
             bad_run = 0.0
             base_t += hop
             continue
 
-        # Degraded vs recent tracking — look for a forward surplus jump first.
+        bad_run += hop
+        if bad_run < confirm_seconds:
+            base_t += hop
+            continue
+
+        # Confirmed degradation — search surplus from the break origin, not the
+        # end of the bad run (keeps gap checks on the pre-jump map).
+        break_base = base_t - bad_run
+        resume_floor = max(min_score + 0.08, good_ema * 0.75)
         surplus_hit = _find_forward_surplus(
             base,
             donor,
-            base_time=base_t,
+            base_time=break_base,
             offset=offset,
             speed=speed,
             half_window=half_window,
             period=period,
-            min_score=min_score,
+            min_score=resume_floor,
             min_surplus_seconds=min_surplus_seconds,
             max_surplus_seconds=max_surplus_seconds,
             break_score=break_score,
@@ -542,12 +559,13 @@ def walk_activity_curves(
                 )
             )
             offset = new_off
+            anchor_offset = new_off
             locks.append(
                 CurveLock(
                     speed=speed,
                     offset_seconds=offset,
-                    base_time=base_t,
-                    donor_time=speed * base_t + offset,
+                    base_time=break_base,
+                    donor_time=speed * break_base + offset,
                     score=resume_score,
                 )
             )
@@ -557,16 +575,10 @@ def walk_activity_curves(
             )
             good_ema = max(resume_score, min_score)
             bad_run = 0.0
-            base_t += hop
-            continue
-
-        bad_run += hop
-        if bad_run < confirm_seconds:
-            base_t += hop
+            base_t = break_base + hop
             continue
 
         # Confirmed break — try missing-base resume, else surplus search.
-        break_base = base_t - bad_run
         break_donor = speed * break_base + offset
         break_donor = max(donor_start, min(donor_end, break_donor))
         resume_min = min_score + 0.05
@@ -606,10 +618,6 @@ def walk_activity_curves(
                 break_score=break_score,
             ):
                 continue
-            if frame_confirm is not None and not frame_confirm(
-                float(anchor), float(surplus_end)
-            ):
-                continue
             surplus = cand
             surplus_anchor = float(anchor)
             break
@@ -628,12 +636,6 @@ def walk_activity_curves(
             max_ahead=max_surplus_seconds,
             hop=hop,
         )
-        if (
-            missing is not None
-            and frame_confirm is not None
-            and not frame_confirm(float(missing[0]), float(break_donor))
-        ):
-            missing = None
         min_missing = max(missing_base_fill_seconds, confirm_seconds)
         if missing is not None and missing[0] - break_base < min_missing:
             missing = None
@@ -800,10 +802,7 @@ def _find_forward_surplus(
         break_score=break_score,
     ):
         return None
-    if frame_confirm is not None and not frame_confirm(
-        base_time, speed * base_time + best_off
-    ):
-        return None
+    _ = frame_confirm  # reserved for a future hard/soft resume policy
     return gap_start, gap_end, best_off, best_sc
 
 
@@ -819,34 +818,61 @@ def _donor_gap_is_unrelated(
     period: float,
     break_score: float,
 ) -> bool:
-    """Reject surplus spans whose interior still matches the base curve.
+    """Reject surplus spans that still track under the pre-jump offset.
 
-    Real ads / junk diverge through the gap; a noisy lock slip often still
-    correlates in the middle of the proposed interval.
+    A false surplus skips real continuing content: the *old* map
+    ``donor ≈ speed·base + offset`` still correlates through the interval.
+    A real ad / junk block does not.
     """
     span = donor_gap_end - donor_gap_start
     if span <= 0:
         return False
-    probes = (
-        donor_gap_start + span * 0.25,
-        donor_gap_start + span * 0.5,
-        donor_gap_start + span * 0.75,
-    )
-    hits = 0
-    for donor_t in probes:
-        score = local_curve_score(
-            base,
-            donor,
-            base_time=base_time,
-            donor_time=float(donor_t),
-            speed=speed,
-            half_window=half_window,
-            period=period,
-        )
-        if score >= break_score:
-            hits += 1
-    # Majority of interior probes still match → not unrelated surplus.
-    return hits <= 1
+    offset_old = donor_gap_start - speed * base_time
+    # Dense probes — a single lucky zero must not green-light a false surplus.
+    # Also try a small offset nudge: mild refine drift must not fake a gap.
+    n_probes = max(5, int(span / max(period, 2.0)))
+    n_probes = min(n_probes, 24)
+    base_lo = float(base.times[0]) + half_window
+    base_hi = float(base.times[-1]) - half_window
+    hop = max(period, 2.0)
+
+    def _gap_stats(trial_offset: float) -> tuple[float, float] | None:
+        scores: list[float] = []
+        for i in range(1, n_probes + 1):
+            donor_t = donor_gap_start + span * (i / (n_probes + 1))
+            pred_base = (float(donor_t) - trial_offset) / max(speed, 1e-6)
+            if pred_base < base_lo or pred_base > base_hi:
+                continue
+            scores.append(
+                local_curve_score(
+                    base,
+                    donor,
+                    base_time=pred_base,
+                    donor_time=float(donor_t),
+                    speed=speed,
+                    half_window=half_window,
+                    period=period,
+                )
+            )
+        if not scores:
+            return None
+        mean_sc = float(np.mean(scores))
+        hit_frac = sum(1 for s in scores if s >= break_score) / len(scores)
+        return mean_sc, hit_frac
+
+    best_mean = 0.0
+    best_hits = 0.0
+    for trial_off in (offset_old - hop, offset_old, offset_old + hop):
+        stats = _gap_stats(trial_off)
+        if stats is None:
+            continue
+        mean_sc, hit_frac = stats
+        if mean_sc > best_mean:
+            best_mean, best_hits = mean_sc, hit_frac
+    if best_mean <= 0.0 and best_hits <= 0.0:
+        return True
+    # Continued tracking under the old map (±hop) → not unrelated surplus.
+    return best_mean < break_score * 0.75 and best_hits <= 0.2
 
 
 def _search_donor_resume(
