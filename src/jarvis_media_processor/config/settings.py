@@ -64,6 +64,29 @@ class Settings(BaseSettings):
         description="Maximum landmarks retained per file.",
     )
 
+    # Video sampling / visual matching
+    video_sample_fps: float = Field(
+        default=1.0,
+        description="Frames per second to sample for visual matching.",
+    )
+    video_phash_size: int = Field(default=8, description="Perceptual hash size.")
+    video_normalize_size: int = Field(
+        default=256,
+        description="Edge size used before computing pHash.",
+    )
+    video_crop_letterbox: bool = Field(
+        default=True,
+        description="Crop near-black letterbox/pillarbox before hashing.",
+    )
+    video_match_max_distance: int = Field(
+        default=12,
+        description="Maximum pHash Hamming distance accepted as a candidate match.",
+    )
+    video_match_max_per_base: int = Field(
+        default=3,
+        description="Maximum donor candidates retained per base frame.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

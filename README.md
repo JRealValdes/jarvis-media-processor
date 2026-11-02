@@ -77,6 +77,16 @@ uv run jmp analyze-audio path/to/donor.mkv --role donor -w .jmp/audio-analysis
 
 Requires **FFmpeg** on `PATH` (or `JMP_FFMPEG_PATH`).
 
+### Visual matching
+
+Sample frames and match base↔donor via perceptual hashes:
+
+```bash
+uv run jmp match-visual path/to/base.mkv path/to/donor.mkv -w .jmp/visual-match
+```
+
+Notes: [docs/visual-matching.md](docs/visual-matching.md).
+
 ## Development
 
 ```bash
