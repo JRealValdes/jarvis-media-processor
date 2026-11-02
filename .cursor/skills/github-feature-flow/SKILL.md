@@ -71,9 +71,21 @@ If `gh issue develop` is unavailable, the branch name + PR link is enough.
 - Verify with unit tests before proposing commits when the change has non-trivial logic.
 - If scope grows and it **materially** helps tracking, update the issue body (checklist / notes) via `gh issue edit <N> --body-file ...` **without asking**. Skip trivial or redundant edits.
 
-## 4. Open a PR (only if the user asks)
+## 4. When the task is done — propose close-out
+
+When the issue work is **complete**, verified, and **fully committed** on `feature/<N>-*`, **proactively propose** (do not wait to be asked):
+
+1. Push the branch  
+2. Open a PR into `main`  
+3. Merge the PR  
+4. Clean up remote + local feature branches, then land on updated `main`
+
+Wait for user confirmation before executing. The user may approve the whole chain in one reply.
+
+## 5. Push and open a PR (after confirmation)
 
 ```bash
+git push -u origin HEAD
 gh pr create --title "<English summary> (#<N>)" --body-file <file>
 ```
 
@@ -93,16 +105,18 @@ Closes #<N>.
 
 `Closes #<N>` associates the PR with the issue and closes it on merge. Use `Refs #<N>` instead if the PR is partial and must not close the issue.
 
-Push with `-u` if the branch has no upstream yet.
+## 6. Merge and branch cleanup (after confirmation)
 
-## 5. After merge — branch cleanup
+```bash
+gh pr merge <PR> --merge   # or --squash if the user prefers
+git fetch --prune
+git checkout main
+git pull origin main
+git push origin --delete feature/<N>-<slug>   # if remote branch still exists
+git branch -d feature/<N>-<slug>              # -D only if needed after squash/rebase
+```
 
-When a PR for `feature/<N>-*` is **merged**:
-
-1. Expect the **remote** branch to be deleted next (usually by the user on the GitHub PR UI).
-2. If `origin` still has the branch after merge, **propose** remote deletion and wait for confirmation — do not delete it unprompted.
-3. When the remote branch is gone (or the user says they deleted it), check out `main`, then **ask before** deleting the local branch (`git branch -d feature/<N>-…`). After a squash/rebase merge, safe `-d` may fail; with user confirmation, `git branch -D` is OK.
-4. End on `main` and **`git pull`** so local `main` includes the merge (`git fetch --prune` as needed).
+End on `main` with a clean working tree matching `origin/main`.
 
 ## Checklist
 
@@ -111,6 +125,7 @@ When a PR for `feature/<N>-*` is **merged**:
 - [ ] On feature/<N>-* (checked out or created), not on main
 - [ ] Work landed on that branch
 - [ ] Issue body updated only when useful
+- [ ] When done + committed: propose push → PR → merge → branch cleanup
 - [ ] PR title ends with (#N); body links Closes/Refs #N
-- [ ] After merge: remote branch deleted (user UI or confirmed agent delete); local branch deleted only after confirmation; on main and pulled
+- [ ] After confirmed merge: remote/local feature branches removed; on main and pulled
 ```
