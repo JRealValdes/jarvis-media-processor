@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jarvis_media_processor.alignment import (
@@ -9,10 +11,13 @@ from jarvis_media_processor.alignment import (
     SyncStrategyLevel,
     detect_alignment_from_landmarks,
     estimate_alignment,
+    estimate_alignment_visual_first,
 )
+from jarvis_media_processor.alignment.detect import detect_alignment_from_artifacts
 from jarvis_media_processor.alignment.evidence import TimePair, landmark_time_pairs
-from jarvis_media_processor.audio.models import AcousticLandmark
+from jarvis_media_processor.audio.models import AcousticLandmark, AudioAnalysisArtifact
 from jarvis_media_processor.fixtures import get_scenario
+from jarvis_media_processor.video.models import FrameCorrespondence
 
 
 def _lm(t: float, strength: float = 0.9) -> AcousticLandmark:
@@ -186,3 +191,109 @@ def test_fixture_already_synced_expectation() -> None:
         donor_duration=truth.donor.duration_seconds,
     )
     assert doc.strategy == SyncStrategyLevel.ALREADY_SYNCED
+
+
+def test_visual_first_accepts_speed_despite_conflicting_audio() -> None:
+    # Visual: donor ≈ 0.96 * base - 28 (Spider-Man-like).
+    visual = [
+        TimePair(float(t), 0.96 * t - 28.0, 0.9, "video_match")
+        for t in range(40, 500, 10)
+    ]
+    # Conflicting audio Cartesian noise around a wrong ~-50s offset.
+    audio = [
+        TimePair(float(t), float(t) - 50.0, 0.95, "audio_landmark")
+        for t in (50, 100, 150, 200, 250)
+    ] + [
+        TimePair(float(t), float(t) - 48.0, 0.9, "audio_landmark")
+        for t in (60, 110, 160, 210, 260)
+    ]
+    doc = estimate_alignment_visual_first(
+        visual,
+        audio,
+        base_duration=600.0,
+        donor_duration=580.0,
+        visual_inlier_tolerance=1.5,
+        min_visual_pairs=8,
+    )
+    assert doc.strategy == SyncStrategyLevel.CONSTANT_SPEED
+    assert doc.global_speed is not None
+    assert abs(doc.global_speed - 0.96) < 0.03
+    assert doc.evidence.get("fusion") == "visual_only_global"
+    assert any("Visual-first" in n for n in doc.notes)
+
+
+def test_weak_audio_does_not_replace_strong_visual_offset() -> None:
+    visual = [
+        TimePair(float(t), float(t) - 8.0, 1.0, "video_shot_anchor")
+        for t in range(10, 200, 5)
+    ]
+    # Dense wrong audio pairs that would win a naive merge.
+    audio = [
+        TimePair(b, d, 1.0, "audio_landmark")
+        for b in (10.0, 20.0, 30.0, 40.0, 50.0)
+        for d in (100.0, 110.0, 120.0, 130.0, 140.0)
+    ]
+    merged_naive = estimate_alignment(
+        visual + audio,
+        base_duration=220.0,
+        donor_duration=220.0,
+        inlier_tolerance=0.12,
+    )
+    visual_first = estimate_alignment_visual_first(
+        visual,
+        audio,
+        base_duration=220.0,
+        donor_duration=220.0,
+        visual_inlier_tolerance=1.0,
+    )
+    assert visual_first.strategy == SyncStrategyLevel.CONSTANT_OFFSET
+    assert visual_first.global_offset_seconds is not None
+    assert abs(visual_first.global_offset_seconds - (-8.0)) < 0.2
+    # Naive merge is allowed to fail or pick something else; visual-first must keep -8.
+    assert visual_first.strategy != merged_naive.strategy or (
+        merged_naive.global_offset_seconds is not None
+        and abs(merged_naive.global_offset_seconds - (-8.0)) < 0.2
+    )
+
+
+def test_detect_from_artifacts_uses_visual_first() -> None:
+    base_audio = AudioAnalysisArtifact(
+        source_path=Path("base"),
+        sample_rate=16_000,
+        channels=1,
+        duration_seconds=30.0,
+        landmarks=[_lm(5.0), _lm(15.0)],
+        energy_hop_seconds=0.01,
+    )
+    donor_audio = AudioAnalysisArtifact(
+        source_path=Path("donor"),
+        sample_rate=16_000,
+        channels=1,
+        duration_seconds=30.0,
+        # Intentionally wrong acoustic times vs visual.
+        landmarks=[_lm(20.0), _lm(25.0)],
+        energy_hop_seconds=0.01,
+    )
+    visual = [
+        FrameCorrespondence(
+            base_time=float(t),
+            donor_time=float(t) + 2.0,
+            distance=0,
+            confidence=1.0,
+            shot_anchor=(t % 10 == 0),
+        )
+        for t in range(0, 28, 2)
+    ]
+    doc = detect_alignment_from_artifacts(
+        base_audio,
+        donor_audio,
+        visual_matches=visual,
+        visual_inlier_tolerance=1.0,
+        min_visual_pairs=4,
+    )
+    assert doc.strategy in {
+        SyncStrategyLevel.CONSTANT_OFFSET,
+        SyncStrategyLevel.ALREADY_SYNCED,
+    }
+    assert doc.global_offset_seconds is not None
+    assert abs(doc.global_offset_seconds - 2.0) < 0.25

@@ -86,11 +86,26 @@ class Settings(BaseSettings):
         default=3,
         description="Maximum donor candidates retained per base frame.",
     )
+    video_shot_min_distance: int = Field(
+        default=20,
+        description="Min consecutive-frame pHash distance to mark a shot cut.",
+    )
 
     # Alignment / escalating sync
     alignment_inlier_tolerance_seconds: float = Field(
         default=0.12,
         description="Max timing residual to count an evidence pair as an inlier.",
+    )
+    alignment_visual_inlier_tolerance_seconds: float = Field(
+        default=1.5,
+        description=(
+            "Inlier tolerance for visual-only timing models "
+            "(looser than audio; accounts for frame sampling)."
+        ),
+    )
+    alignment_visual_min_pairs: int = Field(
+        default=8,
+        description="Minimum visual pairs before preferring a visual-first model.",
     )
 
 

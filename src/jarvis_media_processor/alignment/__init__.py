@@ -6,7 +6,10 @@ from jarvis_media_processor.alignment.detect import (
     detect_alignment_from_landmarks,
     detect_alignment_from_wavs,
 )
-from jarvis_media_processor.alignment.estimate import estimate_alignment
+from jarvis_media_processor.alignment.estimate import (
+    estimate_alignment,
+    estimate_alignment_visual_first,
+)
 from jarvis_media_processor.alignment.models import (
     AlignmentDocument,
     AlignmentSegment,
@@ -29,5 +32,6 @@ __all__ = [
     "detect_alignment_from_landmarks",
     "detect_alignment_from_wavs",
     "estimate_alignment",
+    "estimate_alignment_visual_first",
     "select_monotonic_correspondences",
 ]

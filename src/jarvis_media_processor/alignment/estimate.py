@@ -352,3 +352,105 @@ def estimate_alignment(
         offset_tolerance=max(inlier_tolerance * 2, 0.2),
         notes=notes,
     )
+
+
+_GLOBAL_STRATEGIES = {
+    SyncStrategyLevel.ALREADY_SYNCED,
+    SyncStrategyLevel.CONSTANT_OFFSET,
+    SyncStrategyLevel.CONSTANT_SPEED,
+}
+
+
+def estimate_alignment_visual_first(
+    visual_pairs: list[TimePair],
+    audio_pairs: list[TimePair],
+    *,
+    base_duration: float | None = None,
+    donor_duration: float | None = None,
+    audio_inlier_tolerance: float = 0.12,
+    visual_inlier_tolerance: float = 1.5,
+    min_visual_pairs: int = 8,
+    visual_min_inlier_ratio: float = 0.55,
+    audio_downweight: float = 0.2,
+) -> AlignmentDocument:
+    """Prefer a visual timing model; do not let weak audio override it.
+
+    Policy:
+    1. If enough visual pairs exist, fit offset/speed/piecewise on **visual only**
+       with a looser tolerance (frame sampling).
+    2. Accept global visual models immediately; also prefer visual piecewise when
+       it is at least moderately confident.
+    3. Otherwise fall back to fused evidence with **downweighted** audio so dense
+       cross-language landmark noise cannot dominate.
+    """
+    from jarvis_media_processor.alignment.evidence import downweight_pairs, merge_evidence
+
+    notes: list[str] = []
+    if len(visual_pairs) >= min_visual_pairs:
+        visual_doc = estimate_alignment(
+            visual_pairs,
+            base_duration=base_duration,
+            donor_duration=donor_duration,
+            inlier_tolerance=visual_inlier_tolerance,
+            min_inlier_ratio=visual_min_inlier_ratio,
+            speed_tolerance=0.02,
+        )
+        if visual_doc.strategy in _GLOBAL_STRATEGIES:
+            visual_doc.notes = [
+                "Visual-first: accepted global model from visual evidence only.",
+                *visual_doc.notes,
+            ]
+            evidence = dict(visual_doc.evidence)
+            evidence["visual_pairs"] = len(visual_pairs)
+            evidence["audio_pairs"] = len(audio_pairs)
+            evidence["fusion"] = "visual_only_global"
+            visual_doc.evidence = evidence
+            return visual_doc
+        if (
+            visual_doc.strategy == SyncStrategyLevel.PIECEWISE
+            and visual_doc.confidence >= 0.5
+            and visual_doc.segments
+        ):
+            visual_doc.notes = [
+                "Visual-first: using visual piecewise map (no global model).",
+                *visual_doc.notes,
+            ]
+            evidence = dict(visual_doc.evidence)
+            evidence["visual_pairs"] = len(visual_pairs)
+            evidence["audio_pairs"] = len(audio_pairs)
+            evidence["fusion"] = "visual_only_piecewise"
+            visual_doc.evidence = evidence
+            return visual_doc
+        notes.append(
+            "Visual-first: visual-only fit was weak; falling back to fused evidence "
+            "with downweighted audio."
+        )
+    else:
+        notes.append(
+            f"Visual-first: fewer than {min_visual_pairs} visual pairs; "
+            "using audio-heavy fused escalate."
+        )
+
+    fused = merge_evidence(
+        visual_pairs,
+        downweight_pairs(audio_pairs, audio_downweight),
+    )
+    # When visuals exist, keep a tolerance that can absorb frame quantization.
+    tolerance = (
+        max(audio_inlier_tolerance, visual_inlier_tolerance * 0.5)
+        if visual_pairs
+        else audio_inlier_tolerance
+    )
+    doc = estimate_alignment(
+        fused,
+        base_duration=base_duration,
+        donor_duration=donor_duration,
+        inlier_tolerance=tolerance,
+    )
+    doc.notes = notes + doc.notes
+    evidence = dict(doc.evidence)
+    evidence["visual_pairs"] = len(visual_pairs)
+    evidence["audio_pairs"] = len(audio_pairs)
+    evidence["fusion"] = "fused_downweighted_audio"
+    doc.evidence = evidence
+    return doc
