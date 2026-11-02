@@ -177,14 +177,12 @@ def find_initial_lock(
     max_offset_seconds: float = 1200.0,
     speed_candidates: tuple[float, ...] = (1.0, 0.96, 1.04, 0.92, 1.08),
 ) -> CurveLock | None:
-    """Find the first base↔donor coincidence, happiest cases first.
+    """Find the first base↔donor coincidence via chronological curve search.
 
-    Order:
-    1. Start of both timelines.
-    2. Start of donor vs later base, or start of base vs later donor
-       (missing open credits / leading ads).
-    3. Chronological characteristic base windows vs searched donor positions;
-       on hit, backwards-walk to the exact coincidence start.
+    One expanding search covers the "happy" alignments as early hits:
+    start↔start, donor-head↔later-base (missing open credits), and
+    base-start↔later-donor (leading ads). On the first confirmed hit,
+    backwards-walk to the exact coincidence start.
     """
     period = float(np.median([base.sample_period, donor.sample_period])) or 1.0
     hop = max(period, 2.0)
@@ -219,30 +217,54 @@ def find_initial_lock(
             min_score=min_score * 0.8,
         )
 
-    # --- 1) Happiest: start of both ---
-    for speed in speed_candidates:
-        cand = _score_lock(
-            base,
-            donor,
-            base_time=base_start,
-            donor_time=donor_start,
-            speed=speed,
-            half_window=half_window,
-            period=period,
-            min_score=min_score,
-        )
-        confirmed = _try_and_confirm(cand)
-        if confirmed is not None:
-            return confirmed
+    def _best_of(candidates: list[CurveLock]) -> CurveLock | None:
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: (c.score, -abs(c.speed - 1.0)))
 
-    # --- 2a) Start of donor ↔ later base (missing base head / credits) ---
+    peaks = activity_peak_times(base, min_prominence=0.12)
+    if not peaks:
+        bt, bv = _resample_to_period(base, period)
+        if bt.size == 0:
+            return None
+        order = np.argsort(bv)[::-1][:16]
+        peaks = [float(bt[i]) for i in order]
+
+    # Dense chronological base samples over the searchable head, then peaks.
+    # Density recovers start-aligned / missing-credits locks without a
+    # separate special-case pass.
+    head_limit = min(base_end, base_start + max_offset_seconds)
+    anchors: list[float] = []
+    for t in np.arange(base_start, head_limit + hop * 0.5, hop):
+        anchors.append(float(t))
+    for t in sorted(peaks):
+        if head_limit < t <= base_end and (
+            not anchors or abs(t - anchors[-1]) >= hop
+        ):
+            anchors.append(float(t))
+    if len(anchors) > 400:
+        # Keep the head dense; thin only the far tail.
+        keep_head = int(min(base_start + 600.0, head_limit) - base_start) // int(hop) + 1
+        keep_head = max(keep_head, 60)
+        head = anchors[:keep_head]
+        tail = anchors[keep_head :: max(1, (len(anchors) - keep_head) // 80)]
+        anchors = head + tail
+
+    radii: list[float] = []
+    for step in _expanding_offsets(max_offset_seconds):
+        r = abs(step)
+        if r not in radii:
+            radii.append(r)
+
+    # Ring 0 — donor head across chronological base times (start↔start and
+    # missing open credits). Best-per-speed avoids weak early false locks.
     for speed in speed_candidates:
         best: CurveLock | None = None
-        for base_t in np.arange(base_start, min(base_end, base_start + max_offset_seconds) + hop, hop):
+        for base_t in anchors:
             cand = _score_lock(
                 base,
                 donor,
-                base_time=float(base_t),
+                base_time=base_t,
                 donor_time=donor_start,
                 speed=speed,
                 half_window=half_window,
@@ -259,51 +281,8 @@ def find_initial_lock(
         if confirmed is not None:
             return confirmed
 
-    # --- 2b) Start of base ↔ later donor (leading ads on donor) ---
-    for speed in speed_candidates:
-        best = None
-        for donor_t in np.arange(
-            donor_start, min(donor_end, donor_start + max_offset_seconds) + hop, hop
-        ):
-            cand = _score_lock(
-                base,
-                donor,
-                base_time=base_start,
-                donor_time=float(donor_t),
-                speed=speed,
-                half_window=half_window,
-                period=period,
-                min_score=min_score,
-            )
-            if cand is None:
-                continue
-            if best is None or cand.score > best.score:
-                best = cand
-            if cand.score >= min_score + 0.1:
-                break
-        confirmed = _try_and_confirm(best)
-        if confirmed is not None:
-            return confirmed
-
-    # --- 3) Least happy: characteristic base windows in chronological order ---
-    peaks = activity_peak_times(base, min_prominence=0.12)
-    if not peaks:
-        bt, bv = _resample_to_period(base, period)
-        if bt.size == 0:
-            return None
-        order = np.argsort(bv)[::-1][:16]
-        peaks = [float(bt[i]) for i in order]
-    anchors = [t for t in sorted(peaks) if base_start <= t <= base_end]
-    if len(anchors) > 60:
-        step = max(1, len(anchors) // 60)
-        anchors = anchors[::step]
-
-    radii: list[float] = []
-    for step in _expanding_offsets(max_offset_seconds):
-        r = abs(step)
-        if r not in radii:
-            radii.append(r)
-
+    # Later rings — chronological base × expanding offset (leading ads when
+    # base_t is early; mid-file coincidences otherwise).
     for base_t in anchors:
         for radius in radii:
             offsets = [0.0] if radius == 0 else [radius, -radius]
@@ -313,10 +292,12 @@ def find_initial_lock(
                 offsets.extend(
                     [radius * 0.75, -radius * 0.75, radius * 0.25, -radius * 0.25]
                 )
-            best = None
+            ring_hits: list[CurveLock] = []
             for speed in speed_candidates:
                 for offset in offsets:
                     donor_t = speed * base_t + offset
+                    if abs(donor_t - donor_start) < hop * 0.5:
+                        continue
                     cand = _score_lock(
                         base,
                         donor,
@@ -327,14 +308,9 @@ def find_initial_lock(
                         period=period,
                         min_score=min_score,
                     )
-                    if cand is None:
-                        continue
-                    if best is None or (cand.score, -abs(speed - 1.0)) > (
-                        best.score,
-                        -abs(best.speed - 1.0),
-                    ):
-                        best = cand
-            confirmed = _try_and_confirm(best)
+                    if cand is not None:
+                        ring_hits.append(cand)
+            confirmed = _try_and_confirm(_best_of(ring_hits))
             if confirmed is not None:
                 return confirmed
     return None
