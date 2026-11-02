@@ -13,6 +13,10 @@ from jarvis_media_processor.alignment.models import (
     SyncStrategyLevel,
     TimelineInterval,
 )
+from jarvis_media_processor.alignment.piecewise import (
+    build_piecewise_alignment,
+    select_monotonic_correspondences,
+)
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,27 @@ def _unique_base_times(pairs: list[TimePair]) -> set[float]:
     return {round(p.base_time, 3) for p in pairs}
 
 
+def _unique_donor_times(pairs: list[TimePair]) -> set[float]:
+    return {round(p.donor_time, 3) for p in pairs}
+
+
+def _injective_inliers(inliers: list[TimePair]) -> list[TimePair]:
+    """Keep a 1:1 subset (unique base and donor times), preferring higher weight."""
+    ordered = sorted(inliers, key=lambda p: p.weight, reverse=True)
+    used_base: set[float] = set()
+    used_donor: set[float] = set()
+    selected: list[TimePair] = []
+    for pair in ordered:
+        b = round(pair.base_time, 3)
+        d = round(pair.donor_time, 3)
+        if b in used_base or d in used_donor:
+            continue
+        used_base.add(b)
+        used_donor.add(d)
+        selected.append(pair)
+    return selected
+
+
 def _confidence(
     inliers: list[TimePair],
     base_anchor_count: int,
@@ -96,7 +121,8 @@ def _confidence(
 ) -> float:
     if base_anchor_count <= 0:
         return 0.0
-    coverage = len(_unique_base_times(inliers)) / base_anchor_count
+    injective = _injective_inliers(inliers)
+    coverage = len(_unique_base_times(injective)) / base_anchor_count
     rmse_score = max(0.0, 1.0 - (rmse / max(tolerance, 1e-6)))
     return float(max(0.0, min(1.0, 0.7 * coverage + 0.3 * rmse_score)))
 
@@ -104,8 +130,32 @@ def _confidence(
 def _accepts(inliers: list[TimePair], base_anchor_count: int, *, min_coverage: float) -> bool:
     if base_anchor_count <= 0:
         return False
-    covered = len(_unique_base_times(inliers))
+    injective = _injective_inliers(inliers)
+    covered = len(_unique_base_times(injective))
+    # Require a true 1:1 matching set (no reused donor anchors).
+    if len(_unique_donor_times(injective)) != covered:
+        return False
     return covered >= max(1, int(np.ceil(min_coverage * base_anchor_count)))
+
+
+def _monotonic_agrees(
+    pairs: list[TimePair],
+    *,
+    speed: float,
+    offset: float,
+    tolerance: float,
+    min_coverage: float,
+) -> bool:
+    """Require the monotonic correspondence chain to agree with a global model."""
+    chain = select_monotonic_correspondences(pairs)
+    if not chain:
+        return False
+    ok = sum(
+        1
+        for p in chain
+        if abs(p.donor_time - (speed * p.base_time + offset)) <= tolerance
+    )
+    return ok / len(chain) >= min_coverage
 
 
 def _full_span_segment(
@@ -166,7 +216,7 @@ def estimate_alignment(
     base_duration: float | None = None,
     donor_duration: float | None = None,
     inlier_tolerance: float = 0.12,
-    min_inlier_ratio: float = 0.6,
+    min_inlier_ratio: float = 0.85,
     already_synced_tolerance: float = 0.08,
     speed_tolerance: float = 0.03,
 ) -> AlignmentDocument:
@@ -194,8 +244,20 @@ def estimate_alignment(
         )
 
     offset_fit = fit_offset(pairs, inlier_tolerance=inlier_tolerance)
-    if offset_fit and _accepts(
-        offset_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio
+    if (
+        offset_fit
+        and _accepts(
+            offset_fit.inliers,
+            base_anchor_count,
+            min_coverage=min_inlier_ratio,
+        )
+        and _monotonic_agrees(
+            pairs,
+            speed=1.0,
+            offset=offset_fit.offset,
+            tolerance=inlier_tolerance,
+            min_coverage=min_inlier_ratio,
+        )
     ):
         conf = _confidence(
             offset_fit.inliers,
@@ -237,6 +299,13 @@ def estimate_alignment(
         speed_fit
         and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
         and abs(speed_fit.speed - 1.0) > speed_tolerance
+        and _monotonic_agrees(
+            pairs,
+            speed=speed_fit.speed,
+            offset=speed_fit.offset,
+            tolerance=inlier_tolerance,
+            min_coverage=min_inlier_ratio,
+        )
     ):
         conf = _confidence(
             speed_fit.inliers,
@@ -267,99 +336,11 @@ def estimate_alignment(
             },
         )
 
-    # Piecewise stub: cluster by local offset without inventing coverage.
-    notes.append(
-        "No single offset/speed hypothesis met inlier thresholds; "
-        "emitting piecewise stub from inlier clusters (refine in #7)."
-    )
-    offsets = [(p, p.donor_time - p.base_time) for p in pairs]
-    offsets.sort(key=lambda item: item[0].base_time)
-    clusters: list[list[TimePair]] = []
-    current: list[TimePair] = []
-    current_offset: float | None = None
-    for pair, offset in offsets:
-        if current_offset is None or abs(offset - current_offset) <= inlier_tolerance * 2:
-            current.append(pair)
-            current_offset = (
-                offset
-                if current_offset is None
-                else float(np.mean([c.donor_time - c.base_time for c in current]))
-            )
-        else:
-            if current:
-                clusters.append(current)
-            current = [pair]
-            current_offset = offset
-    if current:
-        clusters.append(current)
-
-    segments: list[AlignmentSegment] = []
-    for cluster in clusters:
-        if len(cluster) < 1:
-            continue
-        off = float(np.mean([p.donor_time - p.base_time for p in cluster]))
-        conf = min(1.0, len(cluster) / max(total, 1))
-        segments.append(
-            AlignmentSegment(
-                base_start=min(p.base_time for p in cluster),
-                base_end=max(p.base_time for p in cluster) + 1e-3,
-                donor_start=min(p.donor_time for p in cluster),
-                donor_end=max(p.donor_time for p in cluster) + 1e-3,
-                speed=1.0,
-                offset_seconds=off,
-                confidence=conf,
-                reliable=len(cluster) >= 2,
-            )
-        )
-
-    uncertain: list[TimelineInterval] = []
-    if base_duration is not None and segments:
-        # Flag gaps between segment endpoints on the base timeline.
-        ordered = sorted(segments, key=lambda s: s.base_start)
-        if ordered[0].base_start > 0.25:
-            uncertain.append(
-                TimelineInterval(
-                    start=0.0,
-                    end=ordered[0].base_start,
-                    timeline="base",
-                    reason="gap_before_first_segment",
-                )
-            )
-        for left, right in zip(ordered, ordered[1:], strict=False):
-            if right.base_start - left.base_end > 0.25:
-                uncertain.append(
-                    TimelineInterval(
-                        start=left.base_end,
-                        end=right.base_start,
-                        timeline="base",
-                        reason="gap_between_segments",
-                    )
-                )
-        if base_duration - ordered[-1].base_end > 0.25:
-            uncertain.append(
-                TimelineInterval(
-                    start=ordered[-1].base_end,
-                    end=base_duration,
-                    timeline="base",
-                    reason="gap_after_last_segment",
-                )
-            )
-    elif not segments:
-        uncertain.append(
-            TimelineInterval(
-                start=0.0,
-                end=base_duration or 0.0,
-                timeline="base",
-                reason="unaligned",
-            )
-        )
-
-    conf = float(np.mean([s.confidence for s in segments])) if segments else 0.0
-    return AlignmentDocument(
-        strategy=SyncStrategyLevel.PIECEWISE,
-        confidence=conf,
-        segments=segments,
-        uncertain_intervals=uncertain,
+    notes.append("No single offset/speed hypothesis met inlier thresholds; using piecewise mapper.")
+    return build_piecewise_alignment(
+        pairs,
+        base_duration=base_duration,
+        donor_duration=donor_duration,
+        offset_tolerance=max(inlier_tolerance * 2, 0.2),
         notes=notes,
-        evidence={"pair_count": total, "segment_count": len(segments)},
     )
