@@ -96,6 +96,14 @@ uv run jmp align path/to/base.mkv path/to/donor.mkv -w .jmp/alignment
 uv run jmp align path/to/base.mkv path/to/donor.mkv --no-video
 ```
 
+### Reconstruct donor audio
+
+Place donor audio onto the base timeline (silence in gaps; no shifting):
+
+```bash
+uv run jmp reconstruct path/to/donor.mkv .jmp/alignment/alignment.json --base-duration 7200 -w .jmp/reconstruct
+```
+
 ## Development
 
 ```bash
