@@ -41,6 +41,7 @@ Thumbs.db
 .jmp/
 tmp/
 temp/
+fixtures/synthetic/
 *.mkv
 *.mp4
 *.ts
