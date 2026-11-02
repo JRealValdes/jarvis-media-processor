@@ -107,6 +107,17 @@ class Settings(BaseSettings):
         default=8,
         description="Minimum visual pairs before preferring a visual-first model.",
     )
+    alignment_audio_refine_window_seconds: float = Field(
+        default=2.0,
+        description=(
+            "After a visual global model, search ±this many seconds for a fine "
+            "audio-envelope offset nudge."
+        ),
+    )
+    alignment_audio_refine_min_score: float = Field(
+        default=0.05,
+        description="Minimum cross-corr score required to apply the audio fine-offset.",
+    )
 
 
 @lru_cache(maxsize=1)
