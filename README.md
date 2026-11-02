@@ -41,11 +41,19 @@ uv run jmp version
 uv run jmp --version
 ```
 
+Inspect one or more media files (e.g. base and donor) and print structured JSON:
+
+```bash
+uv run jmp inspect path/to/base.mkv path/to/donor.mkv
+```
+
 You can also run:
 
 ```bash
 uv run python -m jarvis_media_processor --help
 ```
+
+Requires **FFprobe** on `PATH` (or `JMP_FFPROBE_PATH`) for `inspect`.
 
 ## Development
 
