@@ -32,6 +32,11 @@ from jarvis_media_processor.alignment.piecewise import (
     build_piecewise_alignment,
     select_monotonic_correspondences,
 )
+from jarvis_media_processor.alignment.curve_walk import walk_activity_curves
+from jarvis_media_processor.alignment.unrelated import (
+    detect_curve_gaps,
+    detect_unrelated_donor_spans,
+)
 
 __all__ = [
     "ActivitySyncResult",
@@ -47,7 +52,10 @@ __all__ = [
     "detect_alignment_from_artifacts",
     "detect_alignment_from_landmarks",
     "detect_alignment_from_wavs",
+    "detect_curve_gaps",
+    "detect_unrelated_donor_spans",
     "estimate_alignment",
+    "walk_activity_curves",
     "estimate_alignment_visual_first",
     "estimate_fine_audio_offset",
     "estimate_offset_crosscorr",

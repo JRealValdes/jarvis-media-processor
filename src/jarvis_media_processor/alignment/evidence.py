@@ -97,3 +97,22 @@ def downweight_pairs(pairs: list[TimePair], factor: float) -> list[TimePair]:
         )
         for p in pairs
     ]
+
+
+def filter_pairs_excluding_donor(
+    pairs: list[TimePair],
+    intervals: list[tuple[float, float]],
+) -> list[TimePair]:
+    """Drop evidence pairs whose donor time falls inside an excluded span."""
+    if not intervals:
+        return list(pairs)
+    kept: list[TimePair] = []
+    for pair in pairs:
+        excluded = False
+        for start, end in intervals:
+            if start - 1e-9 <= pair.donor_time <= end + 1e-9:
+                excluded = True
+                break
+        if not excluded:
+            kept.append(pair)
+    return kept
