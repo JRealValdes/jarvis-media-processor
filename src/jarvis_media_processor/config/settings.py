@@ -34,6 +34,36 @@ class Settings(BaseSettings):
         description="FFprobe executable name or path (must be on PATH unless absolute).",
     )
 
+    # Audio analysis / landmarks
+    audio_analysis_sample_rate: int = Field(
+        default=16_000,
+        description="Sample rate for analysis WAV extraction.",
+    )
+    audio_analysis_channels: int = Field(
+        default=1,
+        description="Channel count for analysis WAV extraction.",
+    )
+    audio_landmark_hop_seconds: float = Field(
+        default=0.01,
+        description="Hop size for RMS energy envelope.",
+    )
+    audio_landmark_frame_seconds: float = Field(
+        default=0.04,
+        description="Frame size for RMS energy envelope.",
+    )
+    audio_landmark_min_distance_seconds: float = Field(
+        default=0.25,
+        description="Minimum spacing between energy-peak landmarks.",
+    )
+    audio_landmark_prominence: float = Field(
+        default=0.15,
+        description="Minimum normalized prominence for energy peaks.",
+    )
+    audio_landmark_max_count: int = Field(
+        default=200,
+        description="Maximum landmarks retained per file.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
