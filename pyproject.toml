@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "JRealValdes" }]
 dependencies = [
+    "imagehash>=4.3.2",
     "numpy>=2.4.6",
+    "pillow>=13.0.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
@@ -25,6 +27,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "scipy-stubs>=1.17.1.5",
+    "types-pillow>=10.2.0.20240822",
 ]
 
 [project.scripts]

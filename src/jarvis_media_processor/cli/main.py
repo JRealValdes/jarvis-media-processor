@@ -11,6 +11,7 @@ from jarvis_media_processor import __version__
 from jarvis_media_processor.cli.analyze_audio_cmd import analyze_audio_command
 from jarvis_media_processor.cli.fixtures_cmd import fixtures_app
 from jarvis_media_processor.cli.inspect_cmd import inspect_command
+from jarvis_media_processor.cli.match_visual_cmd import match_visual_command
 from jarvis_media_processor.config import get_settings
 from jarvis_media_processor.logging_config import configure_logging
 
@@ -24,6 +25,7 @@ app = typer.Typer(
 )
 app.command("inspect")(inspect_command)
 app.command("analyze-audio")(analyze_audio_command)
+app.command("match-visual")(match_visual_command)
 app.add_typer(fixtures_app, name="fixtures")
 
 logger = logging.getLogger(__name__)
