@@ -66,6 +66,17 @@ uv run jmp fixtures generate -o fixtures/synthetic
 
 Details: [docs/synthetic-fixtures.md](docs/synthetic-fixtures.md).
 
+### Audio landmarks
+
+Extract analysis WAV and detect sparse energy-peak landmarks:
+
+```bash
+uv run jmp analyze-audio path/to/base.mkv --role base
+uv run jmp analyze-audio path/to/donor.mkv --role donor -w .jmp/audio-analysis
+```
+
+Requires **FFmpeg** on `PATH` (or `JMP_FFMPEG_PATH`).
+
 ## Development
 
 ```bash
