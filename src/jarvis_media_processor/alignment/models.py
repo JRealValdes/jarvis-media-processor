@@ -61,5 +61,6 @@ class AlignmentDocument(BaseModel):
     segments: list[AlignmentSegment] = Field(default_factory=list)
     uncertain_intervals: list[TimelineInterval] = Field(default_factory=list)
     missing_base_intervals: list[TimelineInterval] = Field(default_factory=list)
+    unrelated_donor_intervals: list[TimelineInterval] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     evidence: dict[str, float | int | str] = Field(default_factory=dict)
