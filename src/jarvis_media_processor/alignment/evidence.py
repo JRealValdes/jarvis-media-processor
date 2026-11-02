@@ -50,26 +50,50 @@ def visual_time_pairs(
     matches: list[FrameCorrespondence],
     *,
     min_confidence: float = 0.4,
+    shot_weight_multiplier: float = 1.5,
 ) -> list[TimePair]:
-    """Convert visual frame matches into timed evidence pairs."""
+    """Convert visual frame matches into timed evidence pairs.
+
+    Shot-cut anchors receive a higher weight so they dominate voting when
+    dense pHash matches are ambiguous.
+    """
     pairs: list[TimePair] = []
     for match in matches:
         if match.confidence < min_confidence:
             continue
+        weight = max(match.confidence, 1e-6)
+        source = "video_match"
+        if match.shot_anchor:
+            weight *= shot_weight_multiplier
+            source = "video_shot_anchor"
         pairs.append(
             TimePair(
                 base_time=match.base_time,
                 donor_time=match.donor_time,
-                weight=max(match.confidence, 1e-6),
-                source="video_match",
+                weight=weight,
+                source=source,
             )
         )
     return pairs
 
 
 def merge_evidence(*groups: list[TimePair]) -> list[TimePair]:
-    """Concatenate evidence groups (audio first callers should pass audio first)."""
+    """Concatenate evidence groups."""
     merged: list[TimePair] = []
     for group in groups:
         merged.extend(group)
     return merged
+
+
+def downweight_pairs(pairs: list[TimePair], factor: float) -> list[TimePair]:
+    """Return copies of ``pairs`` with weights scaled by ``factor``."""
+    scale = max(0.0, factor)
+    return [
+        TimePair(
+            base_time=p.base_time,
+            donor_time=p.donor_time,
+            weight=max(p.weight * scale, 1e-9),
+            source=p.source,
+        )
+        for p in pairs
+    ]

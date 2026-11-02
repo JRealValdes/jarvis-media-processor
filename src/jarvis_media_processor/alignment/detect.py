@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from jarvis_media_processor.alignment.estimate import estimate_alignment
+from jarvis_media_processor.alignment.estimate import (
+    estimate_alignment,
+    estimate_alignment_visual_first,
+)
 from jarvis_media_processor.alignment.evidence import (
     landmark_time_pairs,
-    merge_evidence,
     visual_time_pairs,
 )
 from jarvis_media_processor.alignment.models import AlignmentDocument
@@ -29,18 +31,29 @@ def detect_alignment_from_artifacts(
     base_path: Path | None = None,
     donor_path: Path | None = None,
     inlier_tolerance: float = 0.12,
+    visual_inlier_tolerance: float = 1.5,
+    min_visual_pairs: int = 8,
 ) -> AlignmentDocument:
-    """Run escalating sync using precomputed analysis artifacts."""
-    pairs = merge_evidence(
-        landmark_time_pairs(base_audio.landmarks, donor_audio.landmarks),
-        visual_time_pairs(visual_matches or []),
-    )
-    doc = estimate_alignment(
-        pairs,
-        base_duration=base_audio.duration_seconds,
-        donor_duration=donor_audio.duration_seconds,
-        inlier_tolerance=inlier_tolerance,
-    )
+    """Run visual-first escalating sync using precomputed analysis artifacts."""
+    audio_pairs = landmark_time_pairs(base_audio.landmarks, donor_audio.landmarks)
+    visual_pairs = visual_time_pairs(visual_matches or [])
+    if visual_matches:
+        doc = estimate_alignment_visual_first(
+            visual_pairs,
+            audio_pairs,
+            base_duration=base_audio.duration_seconds,
+            donor_duration=donor_audio.duration_seconds,
+            audio_inlier_tolerance=inlier_tolerance,
+            visual_inlier_tolerance=visual_inlier_tolerance,
+            min_visual_pairs=min_visual_pairs,
+        )
+    else:
+        doc = estimate_alignment(
+            audio_pairs,
+            base_duration=base_audio.duration_seconds,
+            donor_duration=donor_audio.duration_seconds,
+            inlier_tolerance=inlier_tolerance,
+        )
     doc.base_path = base_path or base_audio.source_path
     doc.donor_path = donor_path or donor_audio.source_path
     return doc
@@ -90,6 +103,8 @@ def detect_alignment(
         base_path=base.resolve(),
         donor_path=donor.resolve(),
         inlier_tolerance=cfg.alignment_inlier_tolerance_seconds,
+        visual_inlier_tolerance=cfg.alignment_visual_inlier_tolerance_seconds,
+        min_visual_pairs=cfg.alignment_visual_min_pairs,
     )
 
     out = work / "alignment.json"
