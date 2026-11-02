@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from jarvis_media_processor import __version__
+from jarvis_media_processor.cli.fixtures_cmd import fixtures_app
 from jarvis_media_processor.cli.inspect_cmd import inspect_command
 from jarvis_media_processor.config import get_settings
 from jarvis_media_processor.logging_config import configure_logging
@@ -21,6 +22,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.command("inspect")(inspect_command)
+app.add_typer(fixtures_app, name="fixtures")
 
 logger = logging.getLogger(__name__)
 

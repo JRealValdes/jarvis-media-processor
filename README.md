@@ -55,6 +55,17 @@ uv run python -m jarvis_media_processor --help
 
 Requires **FFprobe** on `PATH` (or `JMP_FFPROBE_PATH`) for `inspect`.
 
+### Synthetic fixtures
+
+Generate reproducible base/donor pairs with ground-truth JSON (requires **FFmpeg**):
+
+```bash
+uv run jmp fixtures list
+uv run jmp fixtures generate -o fixtures/synthetic
+```
+
+Details: [docs/synthetic-fixtures.md](docs/synthetic-fixtures.md).
+
 ## Development
 
 ```bash
