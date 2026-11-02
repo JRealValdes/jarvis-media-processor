@@ -42,22 +42,33 @@ Details: same skill file, section “Work on an existing issue”.
 - Implement the requested changes on the current branch.
 - When new scope genuinely belongs on the same issue, **expand the issue body** (English) without asking — only when it adds clear value; do not spam trivial edits.
 
+## When the task is done and committed
+
+As soon as the issue work is **complete**, verified, and **all related changes are committed** on the feature branch, **proactively propose** the delivery close-out (do not wait for the user to ask):
+
+1. **Push** the feature branch to `origin`
+2. **Open a PR** into `main` (title ends with `(#X)`; body links `Closes #X` when the issue is fully done)
+3. **Merge** the PR into `main` (after checks are green / user is satisfied)
+4. **Branch cleanup** — delete remote feature branch if it remains, delete local feature branch, check out `main`, pull/prune
+
+Propose this chain in one short message. **Do not** push, open the PR, merge, or delete branches until the user confirms (they may confirm the whole chain at once).
+
 ## Pull requests
 
-- Create a PR only when the user asks.
 - Title ends with a space and `(#X)` where `X` is the issue number, e.g. `Add FFmpeg transcode pipeline (#8)`.
 - Link the PR to the issue as development work (`Closes #X` or Development sidebar / `gh` linking). Body in English.
+- Open a PR when the user confirms the close-out proposal above (or explicitly asks for a PR).
 
 ## After merge — branch cleanup
 
-Once a PR is **merged**, the next expected step is to remove the feature branch.
+Once a PR is **merged**, remove the feature branch as part of the confirmed close-out (or propose cleanup immediately if merge happened without it):
 
-1. **Remote (`origin`)** — normally deleted by the user on the GitHub PR page (checkbox “Delete branch” / branch delete). If the remote branch is still present after merge, **propose** deleting it (`git push origin --delete feature/<N>-…` or `gh` equivalent) and wait for confirmation. Do not delete the remote branch unprompted.
-2. **Local** — after the remote branch is gone (or the user confirms they already deleted it), switch to `main`, then **ask for confirmation** before deleting the local feature branch (`git branch -d feature/<N>-…`). Prune stale remote-tracking refs (`git fetch --prune`) when useful.
+1. **Remote (`origin`)** — delete if still present (`git push origin --delete feature/<N>-…` or `gh` equivalent), when the user confirmed cleanup.
+2. **Local** — switch to `main`, then delete the local feature branch (`git branch -d feature/<N>-…`). Prune stale remote-tracking refs (`git fetch --prune`) when useful.
 3. Leave the working tree on `main` and **`git pull`** (or `git pull origin main`) so local `main` matches the merge just landed.
 
 Prefer `git branch -d` (safe delete). After a squash/rebase merge, Git may claim the branch is “not fully merged”; if the PR is merged and the user confirmed cleanup, `git branch -D` is OK.
 
 ## Out of scope here
 
-Commit message format stays Conventional Commits (see incremental-commits rules). Do not push or open PRs unless the user requests it.
+Commit message format stays Conventional Commits (see incremental-commits rules). Do not push, open PRs, merge, or delete branches without user confirmation.
