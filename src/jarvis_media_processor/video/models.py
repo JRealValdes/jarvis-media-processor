@@ -47,4 +47,20 @@ class VisualMatchReport(BaseModel):
         default_factory=list,
         description="Detected shot-boundary times on the donor timeline.",
     )
+    base_activity_times: list[float] = Field(
+        default_factory=list,
+        description="Sample times for the base visual activity envelope.",
+    )
+    base_activity_values: list[float] = Field(
+        default_factory=list,
+        description="Normalized consecutive-frame variation on the base timeline.",
+    )
+    donor_activity_times: list[float] = Field(
+        default_factory=list,
+        description="Sample times for the donor visual activity envelope.",
+    )
+    donor_activity_values: list[float] = Field(
+        default_factory=list,
+        description="Normalized consecutive-frame variation on the donor timeline.",
+    )
     params: dict[str, float | int | str] = Field(default_factory=dict)

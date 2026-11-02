@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from jarvis_media_processor.config import Settings, get_settings
+from jarvis_media_processor.video.activity import build_activity_envelope
 from jarvis_media_processor.video.extract import extract_sampled_frames
 from jarvis_media_processor.video.match import match_frames
 from jarvis_media_processor.video.models import VisualMatchReport
@@ -67,6 +68,8 @@ def match_media_visuals(
         base_shot_times=base_shots,
         donor_shot_times=donor_shots,
     )
+    base_activity = build_activity_envelope(base_frames)
+    donor_activity = build_activity_envelope(donor_frames)
 
     report = VisualMatchReport(
         base_path=base.resolve(),
@@ -76,6 +79,10 @@ def match_media_visuals(
         matches=matches,
         base_shot_times=sorted(base_shots),
         donor_shot_times=sorted(donor_shots),
+        base_activity_times=base_activity.times.tolist(),
+        base_activity_values=base_activity.values.tolist(),
+        donor_activity_times=donor_activity.times.tolist(),
+        donor_activity_values=donor_activity.values.tolist(),
         params={
             "sample_fps": cfg.video_sample_fps,
             "phash_size": cfg.video_phash_size,
@@ -86,6 +93,7 @@ def match_media_visuals(
             "shot_min_distance": cfg.video_shot_min_distance,
             "base_shot_count": len(base_shots),
             "donor_shot_count": len(donor_shots),
+            "activity_sample_period": base_activity.sample_period,
         },
     )
     out = work / "visual_match_report.json"
