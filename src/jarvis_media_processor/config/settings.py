@@ -87,6 +87,12 @@ class Settings(BaseSettings):
         description="Maximum donor candidates retained per base frame.",
     )
 
+    # Alignment / escalating sync
+    alignment_inlier_tolerance_seconds: float = Field(
+        default=0.12,
+        description="Max timing residual to count an evidence pair as an inlier.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

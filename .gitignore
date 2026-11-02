@@ -42,6 +42,9 @@ Thumbs.db
 tmp/
 temp/
 fixtures/synthetic/
+
+# Manual local test media (not for CI / not committed by default)
+test_data/
 *.mkv
 *.mp4
 *.ts
