@@ -61,6 +61,10 @@ def detect_alignment_from_artifacts(
     inlier_tolerance: float = 0.12,
     visual_inlier_tolerance: float = 1.5,
     min_visual_pairs: int = 8,
+    visual_min_inlier_ratio: float = 0.55,
+    audio_downweight: float = 0.2,
+    speed_min: float = 0.85,
+    speed_max: float = 1.2,
     audio_refine_window_seconds: float = 2.0,
     audio_refine_min_score: float = 0.05,
     refine_audio_offset: bool = True,
@@ -78,6 +82,10 @@ def detect_alignment_from_artifacts(
             audio_inlier_tolerance=inlier_tolerance,
             visual_inlier_tolerance=visual_inlier_tolerance,
             min_visual_pairs=min_visual_pairs,
+            visual_min_inlier_ratio=visual_min_inlier_ratio,
+            audio_downweight=audio_downweight,
+            speed_min=speed_min,
+            speed_max=speed_max,
         )
     else:
         doc = estimate_alignment(
@@ -85,6 +93,8 @@ def detect_alignment_from_artifacts(
             base_duration=base_audio.duration_seconds,
             donor_duration=donor_audio.duration_seconds,
             inlier_tolerance=inlier_tolerance,
+            speed_min=speed_min,
+            speed_max=speed_max,
         )
     if refine_audio_offset and (visual_matches or activity_pairs):
         doc, refinement = refine_alignment_audio_offset(
@@ -107,7 +117,10 @@ def detect_alignment_from_artifacts(
 
 def _activity_pairs_from_report(
     report: VisualMatchReport,
+    *,
+    settings: Settings | None = None,
 ) -> tuple[list[TimePair], ActivitySyncResult | None]:
+    cfg = settings or get_settings()
     period = float(report.params.get("activity_sample_period", 1.0) or 1.0)
     base_env = _envelope_from_report(
         report.base_activity_times,
@@ -121,7 +134,12 @@ def _activity_pairs_from_report(
     )
     if base_env is None or donor_env is None:
         return [], None
-    sync = estimate_speed_offset_activity(base_env, donor_env)
+    sync = estimate_speed_offset_activity(
+        base_env,
+        donor_env,
+        speed_min=cfg.alignment_speed_min,
+        speed_max=cfg.alignment_speed_max,
+    )
     pairs = activity_time_pairs(base_env, donor_env, sync=sync)
     logger.info(
         "Activity sync method=%s speed=%.4f offset=%.3fs score=%.3f pairs=%d",
@@ -169,7 +187,9 @@ def detect_alignment(
         try:
             report = match_media_visuals(base, donor, work / "visual", settings=cfg)
             visual_matches = report.matches
-            activity_pairs, activity_sync = _activity_pairs_from_report(report)
+            activity_pairs, activity_sync = _activity_pairs_from_report(
+                report, settings=cfg
+            )
             if activity_sync is not None:
                 (work / "activity_sync.json").write_text(
                     json.dumps(
@@ -198,6 +218,10 @@ def detect_alignment(
         inlier_tolerance=cfg.alignment_inlier_tolerance_seconds,
         visual_inlier_tolerance=cfg.alignment_visual_inlier_tolerance_seconds,
         min_visual_pairs=cfg.alignment_visual_min_pairs,
+        visual_min_inlier_ratio=cfg.alignment_visual_min_inlier_ratio,
+        audio_downweight=cfg.alignment_audio_downweight,
+        speed_min=cfg.alignment_speed_min,
+        speed_max=cfg.alignment_speed_max,
         audio_refine_window_seconds=cfg.alignment_audio_refine_window_seconds,
         audio_refine_min_score=cfg.alignment_audio_refine_min_score,
         refine_audio_offset=bool(visual_matches or activity_pairs),

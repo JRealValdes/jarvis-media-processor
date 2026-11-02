@@ -107,6 +107,28 @@ class Settings(BaseSettings):
         default=8,
         description="Minimum visual pairs before preferring a visual-first model.",
     )
+    alignment_visual_min_inlier_ratio: float = Field(
+        default=0.55,
+        description=(
+            "Minimum inlier coverage for visual-only global models. Lower than the "
+            "audio ratio because frame sampling quantizes times (~1/fps)."
+        ),
+    )
+    alignment_speed_min: float = Field(
+        default=0.85,
+        description="Minimum speed factor when fitting donor ≈ speed * base + offset.",
+    )
+    alignment_speed_max: float = Field(
+        default=1.2,
+        description="Maximum speed factor when fitting donor ≈ speed * base + offset.",
+    )
+    alignment_audio_downweight: float = Field(
+        default=0.2,
+        description=(
+            "Weight multiplier for acoustic pairs when fused after a weak visual-only "
+            "fit (avoids cross-language landmark noise dominating)."
+        ),
+    )
     alignment_audio_refine_window_seconds: float = Field(
         default=2.0,
         description=(
