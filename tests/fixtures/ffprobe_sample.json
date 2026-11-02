@@ -1,0 +1,62 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "h264",
+      "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "profile": "High",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "pix_fmt": "yuv420p",
+      "avg_frame_rate": "24000/1001",
+      "duration": "120.120000",
+      "bit_rate": "5000000",
+      "tags": {
+        "language": "und"
+      }
+    },
+    {
+      "index": 1,
+      "codec_name": "aac",
+      "codec_long_name": "AAC (Advanced Audio Coding)",
+      "codec_type": "audio",
+      "sample_rate": "48000",
+      "channels": 2,
+      "channel_layout": "stereo",
+      "sample_fmt": "fltp",
+      "duration": "120.000000",
+      "bit_rate": "192000",
+      "tags": {
+        "language": "eng",
+        "title": "English"
+      }
+    },
+    {
+      "index": 2,
+      "codec_name": "ac3",
+      "codec_long_name": "ATSC A/52A (AC-3)",
+      "codec_type": "audio",
+      "sample_rate": "48000",
+      "channels": 6,
+      "channel_layout": "5.1",
+      "duration": "120.000000",
+      "bit_rate": "448000",
+      "tags": {
+        "language": "spa",
+        "title": "Spanish"
+      }
+    }
+  ],
+  "format": {
+    "filename": "sample.mkv",
+    "format_name": "matroska,webm",
+    "format_long_name": "Matroska / WebM",
+    "duration": "120.120000",
+    "size": "80000000",
+    "bit_rate": "5328000",
+    "tags": {
+      "title": "Sample"
+    }
+  }
+}
