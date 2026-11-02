@@ -1,5 +1,10 @@
 """Video frame extraction and visual matching."""
 
+from jarvis_media_processor.video.activity import (
+    ActivityEnvelope,
+    activity_peak_times,
+    build_activity_envelope,
+)
 from jarvis_media_processor.video.analyze import match_media_visuals
 from jarvis_media_processor.video.extract import (
     FFmpegNotFoundError,
@@ -17,10 +22,13 @@ from jarvis_media_processor.video.preprocess import crop_letterbox, normalize_fr
 from jarvis_media_processor.video.shots import detect_shot_boundaries, shot_boundary_times
 
 __all__ = [
+    "ActivityEnvelope",
     "FFmpegNotFoundError",
     "FrameCorrespondence",
     "SampledFrame",
     "VisualMatchReport",
+    "activity_peak_times",
+    "build_activity_envelope",
     "build_frame_extract_command",
     "compute_phash",
     "crop_letterbox",
