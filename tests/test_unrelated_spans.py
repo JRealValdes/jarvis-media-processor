@@ -72,6 +72,21 @@ def test_curve_walk_finds_inserted_ad_block() -> None:
     )
 
 
+def test_curve_lock_frame_confirm_rejects_lookalike() -> None:
+    """Derivative lock must fail when frame_confirm says pictures differ."""
+    base, donor, _ = _donor_with_ad_block()
+    result = walk_activity_curves(
+        base,
+        donor,
+        half_window=6.0,
+        hop_seconds=2.0,
+        min_score=0.25,
+        frame_confirm=lambda _b, _d: False,
+    )
+    assert result.locks == []
+    assert "no initial lock" in " ".join(result.notes).lower()
+
+
 def test_clean_envelopes_have_no_surplus() -> None:
     base = _pulse_envelope(120, list(range(2, 120, 3)))
     donor = _pulse_envelope(120, list(range(7, 125, 3)))  # +5 offset

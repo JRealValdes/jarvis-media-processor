@@ -37,6 +37,7 @@ from jarvis_media_processor.audio.models import AcousticLandmark, AudioAnalysisA
 from jarvis_media_processor.config import Settings, get_settings
 from jarvis_media_processor.video import match_media_visuals
 from jarvis_media_processor.video.activity import ActivityEnvelope
+from jarvis_media_processor.video.confirm import make_frame_confirmer
 from jarvis_media_processor.video.models import FrameCorrespondence, VisualMatchReport
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,14 @@ def _activity_pairs_from_report(
     )
     if base_env is None or donor_env is None:
         return [], None, [], []
+    frame_confirm = None
+    if report.base_frames and report.donor_frames:
+        frame_confirm = make_frame_confirmer(
+            report.base_frames,
+            report.donor_frames,
+            max_distance=int(cfg.video_match_max_distance),
+            max_time_delta=max(2.0, 1.5 / max(cfg.video_sample_fps, 0.1)),
+        )
     walk = detect_curve_gaps(
         base_env,
         donor_env,
@@ -178,6 +187,7 @@ def _activity_pairs_from_report(
         max_surplus_seconds=cfg.alignment_unrelated_max_surplus_seconds,
         missing_base_fill_seconds=cfg.alignment_missing_base_fill_seconds,
         confirm_seconds=cfg.alignment_curve_confirm_seconds,
+        frame_confirm=frame_confirm,
     )
     unrelated = walk.unrelated_donor_intervals
     missing_base = walk.missing_base_intervals

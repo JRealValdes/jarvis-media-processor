@@ -27,12 +27,14 @@ def detect_unrelated_donor_spans(
     max_surplus_seconds: float = 1200.0,
     missing_base_fill_seconds: float = 3.0,
     confirm_seconds: float = 6.0,
+    frame_confirm=None,
 ) -> list[TimelineInterval]:
     """Find surplus donor intervals via activity-curve walking.
 
     ``sync`` / ``score_ratio`` / ``lag_jump_seconds`` are kept for call-site
     compatibility; the walker expands offset search itself and does not need a
-    precomputed global sync.
+    precomputed global sync. Optional ``frame_confirm(base_t, donor_t)`` rejects
+    derivative lookalikes using actual frame content.
     """
     _ = (sync, score_ratio, lag_jump_seconds, search_seconds)
     result = walk_activity_curves(
@@ -46,6 +48,7 @@ def detect_unrelated_donor_spans(
         max_surplus_seconds=max_surplus_seconds,
         missing_base_fill_seconds=missing_base_fill_seconds,
         max_offset_seconds=max_surplus_seconds,
+        frame_confirm=frame_confirm,
     )
     return result.unrelated_donor_intervals
 
@@ -61,6 +64,7 @@ def detect_curve_gaps(
     max_surplus_seconds: float = 1200.0,
     missing_base_fill_seconds: float = 3.0,
     confirm_seconds: float = 6.0,
+    frame_confirm=None,
 ):
     """Return full curve-walk result (surplus donor + missing base)."""
     return walk_activity_curves(
@@ -74,6 +78,7 @@ def detect_curve_gaps(
         max_surplus_seconds=max_surplus_seconds,
         missing_base_fill_seconds=missing_base_fill_seconds,
         max_offset_seconds=max_surplus_seconds,
+        frame_confirm=frame_confirm,
     )
 
 
