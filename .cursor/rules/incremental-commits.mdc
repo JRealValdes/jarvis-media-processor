@@ -1,0 +1,62 @@
+---
+description: Propose logical, verified commits during work; never auto-commit
+alwaysApply: true
+---
+
+# Incremental commits
+
+Prefer small, logical commits as work lands — not one large dump at the end, and not a commit per trivial edit. One commit per meaningful step.
+
+When a step is already a coherent unit (one concern, builds on the previous step, history would be readable later) **and it has been verified**, stop and propose a commit before continuing:
+
+1. Say that this is a good commit point
+2. Show a short summary of the changes
+3. Propose a commit message using Conventional Commits (see below)
+4. Ask whether to commit with that message
+
+Do **not** create the commit until the user confirms. If they want a different message, a split, or to skip, follow that.
+
+## Commit message format
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes on every proposed message:
+
+```
+<type>: <short summary in English>
+
+[optional body — why, not what]
+```
+
+Common types:
+
+| Type | Use for |
+|------|---------|
+| `feat` | New user-facing capability |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `test` | Adding or updating tests |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `chore` | Tooling, rules, deps, housekeeping |
+| `style` | Formatting / whitespace with no logic change |
+| `perf` | Performance improvement |
+| `ci` | CI configuration |
+
+Examples: `docs: adopt English-only language conventions`, `feat: add media transcode step`, `chore: tighten commit proposal rules`.
+
+When the user confirms, follow the existing git safety protocol for *how* to commit (status, diff, log, no force, no hook-skipping, HEREDOC message). This rule only changes *when* to offer a commit.
+
+## Verification before proposing a commit
+
+Do not propose a commit for unverified work. Report what you tested and the result before asking to commit.
+
+### New functionality / non-trivial logic (`feat`, behavior changes, bug fixes with logic)
+
+**Always** add or extend unit tests and run them before proposing the commit. Cover the new behavior as thoroughly as practical: happy paths, edge cases, and failure modes you can reach without heavy infrastructure. Prefer the project's existing test stack (e.g. `uv run` for Python, the repo's test runner otherwise). Smoke-running the app alone is not enough when unit tests are feasible.
+
+If the suite cannot cover something (UI-only, hardware, live network, FFmpeg binaries), say what remains untested and still unit-test everything that can be isolated.
+
+### Lighter changes
+
+- Config-only, comments, docs, or pure formatting: a sanity check is enough; do not invent a test harness
+- If the natural check is running a CLI/script/fixture and there is no logic worth unit-testing, do that and report the result
+
+If verification failed or was skipped when tests were required, say so and do not propose a commit yet.
