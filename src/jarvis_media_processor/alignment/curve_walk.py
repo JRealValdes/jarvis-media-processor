@@ -892,35 +892,47 @@ def walk_activity_curves(
                 if _slip2 > 45.0 and resume_score < 0.55:
                     surplus = None
 
-        missing = _search_base_resume(
+        min_missing = max(missing_base_fill_seconds, confirm_seconds)
+        missing_hit = _find_forward_missing(
             base,
             donor,
-            donor_time=break_donor,
-            base_search_start=break_base + missing_base_fill_seconds,
+            break_base=break_base,
+            break_donor=break_donor,
             speed=speed,
             offset=offset,
             half_window=half_window,
             period=period,
             min_score=resume_min,
+            min_missing_seconds=min_missing,
             max_ahead=max_surplus_seconds,
-            hop=hop,
+            confirm_seconds=confirm_seconds,
+            hop_seconds=hop,
+            frame_confirm=frame_confirm,
         )
-        min_missing = max(missing_base_fill_seconds, confirm_seconds)
-        if missing is not None and missing[0] - break_base < min_missing:
-            missing = None
-        # A picture-supported forward surplus is a donor insert; an activity-only
-        # missing-base hit at the same break is usually a periodic false resume.
+        # Picture-supported surplus is a donor insert; drop competing missing.
         if (
-            missing is not None
+            missing_hit is not None
             and surplus_hit is not None
             and frame_confirm is not None
         ):
-            missing = None
+            missing_hit = None
+        # A *strong* picture-backed missing jump outranks a mild speed refine
+        # (half-window bleed into a real cut). Weak/short framed hits must not
+        # veto speed refine on cross-encode jitter.
+        if (
+            missing_hit is not None
+            and speed_hit is not None
+            and frame_confirm is not None
+            and missing_hit[1] >= 0.65
+            and missing_hit[0] - break_base >= max(min_missing, 15.0)
+        ):
+            speed_hit = None
 
-        # Rank hypotheses: (kind, score, payload). A real ad leaves speed_hit
-        # None, so surplus/missing win alone. When both fire (wrong linear speed
-        # on continuing film), prefer speed refine — surplus must not win on a
-        # small score edge / artificial bonus.
+
+        # Rank hypotheses: (kind, score, payload). Human order at a break:
+        # speed refine (no jump) vs surplus donor vs missing base. Speed gets a
+        # small edge when both fire without picture-backed jumps; surplus must
+        # not win on a tiny score edge alone.
         ranked: list[tuple[str, float, object]] = []
         if speed_hit is not None:
             ranked.append(("speed", float(speed_hit.score) + 0.08, speed_hit))
@@ -930,8 +942,8 @@ def walk_activity_curves(
             ranked.append(
                 ("surplus_search", float(surplus[1]), (surplus, surplus_anchor))
             )
-        if missing is not None:
-            ranked.append(("missing", float(missing[1]), missing))
+        if missing_hit is not None:
+            ranked.append(("missing", float(missing_hit[1]), missing_hit))
 
         if not ranked:
             notes.append(
@@ -1021,13 +1033,24 @@ def walk_activity_curves(
             continue
 
         # kind == "missing"
-        resume_base, resume_score = payload  # type: ignore[misc]
+        resume_base, resume_score, resume_donor = payload  # type: ignore[misc]
         missing_base.append(
             TimelineInterval(
                 start=float(break_base),
                 end=float(resume_base),
                 timeline="base",
                 reason="curve_break_missing_base",
+            )
+        )
+        offset = float(resume_donor) - speed * float(resume_base)
+        anchor_offset = offset
+        locks.append(
+            CurveLock(
+                speed=speed,
+                offset_seconds=offset,
+                base_time=float(resume_base),
+                donor_time=float(resume_donor),
+                score=float(resume_score),
             )
         )
         notes.append(
@@ -1338,6 +1361,190 @@ def _search_donor_resume(
         near = hits
     donor_t, score = max(near, key=lambda item: (item[0], item[1]))
     return donor_t, score
+
+
+def _find_forward_missing(
+    base: ActivityEnvelope,
+    donor: ActivityEnvelope,
+    *,
+    break_base: float,
+    break_donor: float,
+    speed: float,
+    offset: float,
+    half_window: float,
+    period: float,
+    min_score: float,
+    min_missing_seconds: float,
+    max_ahead: float,
+    confirm_seconds: float,
+    hop_seconds: float,
+    frame_confirm: Callable[[float, float], bool] | None = None,
+) -> tuple[float, float, float] | None:
+    """If a forward base jump restores the curve, return missing span + donor time.
+
+    Returns ``(resume_base, resume_score, resume_donor)`` or ``None``.
+
+    Breaks often fire a few seconds *before* the donor reaches post-cut content
+    (half-window bleed). Probe a short forward donor window while searching the
+    base, then prefer the earliest picture-supported resume (mirroring surplus).
+    """
+    hop = max(hop_seconds, period)
+    base_lo = float(base.times[0]) + half_window
+    base_hi = float(base.times[-1]) - half_window
+    donor_lo = float(donor.times[0])
+    donor_hi = float(donor.times[-1])
+    search_start = max(base_lo, float(break_base) + float(min_missing_seconds))
+    limit = min(base_hi, float(break_base) + float(max_ahead))
+    if search_start > limit:
+        return None
+
+    # Donor may still be in pre-cut content at break_donor; look a little ahead.
+    donor_span = max(float(confirm_seconds), float(half_window), 12.0)
+    donor_candidates = [
+        float(break_donor) + float(delta)
+        for delta in np.arange(0.0, donor_span + 1e-9, 1.0)
+        if donor_lo - 1e-6 <= float(break_donor) + float(delta) <= donor_hi + 1e-6
+    ]
+    if not donor_candidates:
+        donor_candidates = [float(break_donor)]
+
+    confirmed: list[tuple[float, float, float]] = []  # base_t, score, donor_t
+    base_step = 1.0
+    for base_t in np.arange(search_start, limit + 1e-9, base_step):
+        best_sc = -1.0
+        best_d = float(break_donor)
+        for d_t in donor_candidates:
+            sc = local_curve_score(
+                base,
+                donor,
+                base_time=float(base_t),
+                donor_time=float(d_t),
+                speed=speed,
+                half_window=half_window,
+                period=period,
+            )
+            if sc < min_score:
+                continue
+            trial_off = float(d_t) - speed * float(base_t)
+            trial_lock = CurveLock(
+                speed=speed,
+                offset_seconds=trial_off,
+                base_time=float(base_t),
+                donor_time=float(d_t),
+                score=float(sc),
+            )
+            if not _confirm_lock(
+                base,
+                donor,
+                trial_lock,
+                half_window=half_window,
+                period=period,
+                hop=hop,
+                min_score=min_score,
+                confirm_seconds=min(confirm_seconds, 6.0),
+                frame_confirm=None,
+            ):
+                continue
+            if sc > best_sc:
+                best_sc = float(sc)
+                best_d = float(d_t)
+        if best_sc >= min_score:
+            confirmed.append((float(base_t), best_sc, best_d))
+
+    if not confirmed:
+        # With picture available, do not invent resumes from the coarse legacy
+        # nudge — that path returns weak scores and derails cross-encode walks.
+        if frame_confirm is not None:
+            return None
+        legacy = _search_base_resume(
+            base,
+            donor,
+            donor_time=float(break_donor),
+            base_search_start=search_start,
+            speed=speed,
+            offset=offset,
+            half_window=half_window,
+            period=period,
+            min_score=min_score,
+            max_ahead=max_ahead,
+            hop=hop,
+        )
+        if legacy is None:
+            return None
+        resume_base, resume_score = legacy
+        gap = resume_base - break_base
+        if gap < min_missing_seconds:
+            return None
+        if not _missing_gap_credible(gap, resume_score, picture_backed=False):
+            return None
+        return resume_base, resume_score, float(break_donor)
+
+    def _frames_ok(base_t: float, donor_t: float) -> bool:
+        if frame_confirm is None:
+            return False
+        # Probe a short window with constant post-gap offset.
+        trial_off = float(donor_t) - speed * float(base_t)
+        for delta in range(0, int(max(confirm_seconds, 1.0)) + 1):
+            anchor = float(base_t) + float(delta)
+            if frame_confirm(anchor, speed * anchor + trial_off):
+                return True
+        return False
+
+    # Frame hits still need a real activity score — soft pHash alone invents
+    # short missing gaps on grade-mismatched pairs.
+    framed = [
+        c for c in confirmed if c[1] >= 0.5 and _frames_ok(c[0], c[2])
+    ]
+    strong = [c for c in confirmed if c[1] >= 0.5]
+    if framed:
+        ordered = sorted(framed, key=lambda item: (item[0], -item[1]))
+    elif frame_confirm is not None:
+        # Picture bank present but no frame-backed resume: refuse activity-only
+        # long jumps (self-similar scenes elsewhere in the film).
+        return None
+    else:
+        ordered = sorted(strong or confirmed, key=lambda item: (item[0], -item[1]))
+
+    picture_backed = frame_confirm is not None
+    for resume_base, resume_score, resume_donor in ordered:
+        gap = resume_base - break_base
+        if gap < min_missing_seconds:
+            continue
+        if not _missing_gap_credible(
+            gap, resume_score, picture_backed=picture_backed
+        ):
+            continue
+        return resume_base, resume_score, resume_donor
+    return None
+
+
+def _missing_gap_credible(
+    gap: float,
+    resume_score: float,
+    *,
+    picture_backed: bool,
+) -> bool:
+    """Reject short/weak missing-base islands that are usually cross-encode jitter.
+
+    Real cuts in this pipeline are tens of seconds (synthetic ~30s). Brief
+    framed agreements at 6–15s routinely appear on grade-mismatched film and
+    should not outrank continuing the walk / surplus / speed refine. Activity-
+    only fixtures without frames keep a lower floor so unit pulses still work.
+    """
+    if picture_backed:
+        # With frames, short picture hits are usually grade-mismatch aliases.
+        # Mid gaps need a solid activity score; long cuts (synth ~30s+) may be
+        # weaker on cross-grade activity and rely on frame agreement alone.
+        if gap < 15.0:
+            return False
+        if gap < 30.0 and resume_score < 0.65:
+            return False
+        return True
+    if gap < 12.0 and resume_score < 0.65:
+        return False
+    if gap < 20.0 and resume_score < 0.55:
+        return False
+    return True
 
 
 def _search_base_resume(

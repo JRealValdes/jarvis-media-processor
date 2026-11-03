@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from jarvis_media_processor.alignment.curve_walk import (
+    _find_forward_missing,
     _find_forward_surplus,
+    _missing_gap_credible,
     find_initial_lock,
     walk_activity_curves,
 )
@@ -375,6 +377,139 @@ def test_missing_base_extra_scene_detected() -> None:
     assert result.missing_base_intervals, "expected a missing-base gap"
     assert any(s.end - s.start >= 3.0 for s in result.missing_base_intervals)
     assert any(s.start <= 50 and s.end >= 42 for s in result.missing_base_intervals)
+
+
+def test_missing_gap_credible_picture_vs_activity() -> None:
+    """Picture-backed resumes reject short islands; activity-only is looser."""
+    assert _missing_gap_credible(10.0, 0.95, picture_backed=True) is False
+    assert _missing_gap_credible(18.0, 0.70, picture_backed=True) is True
+    assert _missing_gap_credible(22.0, 0.60, picture_backed=True) is False
+    assert _missing_gap_credible(32.0, 0.50, picture_backed=True) is True
+    assert _missing_gap_credible(10.0, 0.70, picture_backed=False) is True
+    assert _missing_gap_credible(10.0, 0.50, picture_backed=False) is False
+
+
+def _shared_then_base_gap(
+    *,
+    head: int = 40,
+    gap: int = 32,
+    tail: int = 40,
+) -> tuple[ActivityEnvelope, ActivityEnvelope]:
+    """Matching pulse trains with a base-only mid stretch of ``gap`` seconds."""
+    donor_len = head + tail
+    base_len = head + gap + tail
+    base_vals = np.zeros(base_len, dtype=np.float64)
+    donor_vals = np.zeros(donor_len, dtype=np.float64)
+    for i in range(2, head, 4):
+        base_vals[i] = 1.0
+        base_vals[i + 1] = 0.4
+        donor_vals[i] = 1.0
+        donor_vals[i + 1] = 0.4
+    # Distinct base-only content so the walk cannot soft-match inside the gap.
+    for i in range(head, head + gap):
+        base_vals[i] = 0.15 if (i % 7) == 0 else 0.0
+    for i in range(0, tail, 4):
+        bi = head + gap + i
+        di = head + i
+        base_vals[bi] = 1.0
+        if bi + 1 < base_len:
+            base_vals[bi + 1] = 0.4
+        donor_vals[di] = 1.0
+        if di + 1 < donor_len:
+            donor_vals[di + 1] = 0.4
+    return (
+        ActivityEnvelope(
+            times=np.arange(base_len, dtype=np.float64),
+            values=base_vals,
+            sample_period=1.0,
+        ),
+        ActivityEnvelope(
+            times=np.arange(donor_len, dtype=np.float64),
+            values=donor_vals,
+            sample_period=1.0,
+        ),
+    )
+
+
+def test_find_forward_missing_requires_frames_when_available() -> None:
+    """With a frame bank, activity-only aliases must not invent a resume."""
+    base, donor = _shared_then_base_gap(gap=32)
+    # Frames never agree → must refuse even if activity would match later.
+    hit = _find_forward_missing(
+        base,
+        donor,
+        break_base=38.0,
+        break_donor=38.0,
+        speed=1.0,
+        offset=0.0,
+        half_window=5.0,
+        period=1.0,
+        min_score=0.25,
+        min_missing_seconds=6.0,
+        max_ahead=80.0,
+        confirm_seconds=3.0,
+        hop_seconds=1.0,
+        frame_confirm=lambda _b, _d: False,
+    )
+    assert hit is None
+
+
+def test_find_forward_missing_accepts_framed_long_gap() -> None:
+    """Picture-backed resume after a ~30s base cut is accepted."""
+    base, donor = _shared_then_base_gap(gap=32)
+    resume_base = 40.0 + 32.0
+
+    def frames_ok(base_t: float, donor_t: float) -> bool:
+        return abs(base_t - resume_base) <= 2.0 and abs(donor_t - 40.0) <= 3.0
+
+    hit = _find_forward_missing(
+        base,
+        donor,
+        break_base=38.0,
+        break_donor=38.0,
+        speed=1.0,
+        offset=0.0,
+        half_window=5.0,
+        period=1.0,
+        min_score=0.25,
+        min_missing_seconds=6.0,
+        max_ahead=80.0,
+        confirm_seconds=3.0,
+        hop_seconds=1.0,
+        frame_confirm=frames_ok,
+    )
+    assert hit is not None
+    resume_t, score, resume_donor = hit
+    assert resume_t - 38.0 >= 30.0
+    assert score >= 0.5
+    assert abs(resume_donor - 40.0) <= 4.0
+
+
+def test_find_forward_missing_rejects_short_framed_island() -> None:
+    """Brief framed agreements (<15s) are treated as jitter, not missing-base."""
+    base, donor = _shared_then_base_gap(gap=32)
+
+    def frames_ok(base_t: float, donor_t: float) -> bool:
+        # Agree only on a short 8s jump — classic cross-encode alias.
+        return abs(base_t - 46.0) <= 1.0 and abs(donor_t - 38.0) <= 4.0
+
+    hit = _find_forward_missing(
+        base,
+        donor,
+        break_base=38.0,
+        break_donor=38.0,
+        speed=1.0,
+        offset=0.0,
+        half_window=5.0,
+        period=1.0,
+        min_score=0.25,
+        min_missing_seconds=6.0,
+        max_ahead=80.0,
+        confirm_seconds=3.0,
+        hop_seconds=1.0,
+        frame_confirm=frames_ok,
+    )
+    assert hit is None
 
 
 def test_filter_pairs_excluding_donor() -> None:
