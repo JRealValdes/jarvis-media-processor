@@ -122,6 +122,17 @@ uv run jmp mux path/to/base.mkv .jmp/job/fine-warp/donor_on_base_fine.wav -o out
 
 `fine-warp` is optional but recommended when lip-sync is close but not exact after reconstruct. It compares the reconstructed WAV to **base audio track 0**, builds a dense residual lag field from band-limited **onset** envelopes (not dialogue landmark snapping), keeps only high-confidence “pillars”, and interpolates elsewhere. Design notes and failure playbook: [docs/fine-warp.md](docs/fine-warp.md).
 
+### Standalone jobs
+
+Submit a full graft as a persisted job (status under `JMP_WORK_DIR/jobs/`):
+
+```bash
+uv run jmp job submit path/to/base.mkv path/to/donor.mkv -o out.mkv
+uv run jmp job status <job-id>
+uv run jmp job list
+uv run jmp job cancel <job-id>
+```
+
 ### Mux
 
 Stream-copy base A/V and attach the reconstructed (or fine-warped) donor audio as an extra track:
