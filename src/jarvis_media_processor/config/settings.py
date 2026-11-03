@@ -25,6 +25,13 @@ class Settings(BaseSettings):
         default=Path(".jmp"),
         description="Root directory for temporary workspaces and job artifacts.",
     )
+    jobs_cleanup_workspace_on_success: bool = Field(
+        default=False,
+        description=(
+            "After a successful job, delete bulky intermediate WAV/PNG under the "
+            "job workspace (JSON reports/plans are kept). Failure keeps everything."
+        ),
+    )
     ffmpeg_path: str = Field(
         default="ffmpeg",
         description="FFmpeg executable name or path (must be on PATH unless absolute).",

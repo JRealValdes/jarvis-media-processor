@@ -13,6 +13,7 @@ from jarvis_media_processor.cli.analyze_audio_cmd import analyze_audio_command
 from jarvis_media_processor.cli.fine_warp_cmd import fine_warp_command
 from jarvis_media_processor.cli.fixtures_cmd import fixtures_app
 from jarvis_media_processor.cli.inspect_cmd import inspect_command
+from jarvis_media_processor.cli.job_cmd import job_app
 from jarvis_media_processor.cli.match_visual_cmd import match_visual_command
 from jarvis_media_processor.cli.mux_cmd import mux_command
 from jarvis_media_processor.cli.reconstruct_cmd import reconstruct_command
@@ -34,6 +35,7 @@ app.command("align")(align_command)
 app.command("reconstruct")(reconstruct_command)
 app.command("fine-warp")(fine_warp_command)
 app.command("mux")(mux_command)
+app.add_typer(job_app, name="job")
 app.add_typer(fixtures_app, name="fixtures")
 
 logger = logging.getLogger(__name__)
