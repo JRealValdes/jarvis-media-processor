@@ -17,6 +17,10 @@ from jarvis_media_processor.reconstruct.render import (
     fill_missing_base_audio,
     render_placements,
 )
+from jarvis_media_processor.report.build import (
+    build_processing_report,
+    write_processing_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +163,20 @@ def reconstruct_donor_audio(
         result.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
+    report = build_processing_report(
+        alignment,
+        result,
+        base_duration=base_duration,
+        settings=cfg,
+    )
+    report_path = write_processing_report(report, work)
     logger.info(
-        "Reconstructed donor audio -> %s (%.2fs, %d placements)",
+        "Reconstructed donor audio -> %s (%.2fs, %d placements); report=%s review=%s",
         out_wav,
         result.duration_seconds,
         len(placements),
+        report_path,
+        report.needs_manual_review,
     )
     return result
 

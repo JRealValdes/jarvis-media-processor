@@ -1,0 +1,262 @@
+"""Validators for alignment + reconstruction consistency."""
+
+from __future__ import annotations
+
+from jarvis_media_processor.alignment.models import AlignmentDocument, SyncStrategyLevel
+from jarvis_media_processor.reconstruct.models import Placement, ReconstructionResult
+from jarvis_media_processor.report.models import (
+    CoverageSummary,
+    FindingSeverity,
+    ValidationFinding,
+)
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals, key=lambda item: item[0])
+    merged: list[tuple[float, float]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1e-9:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def placement_overlaps(
+    placements: list[Placement],
+    *,
+    min_overlap_seconds: float = 0.05,
+) -> list[ValidationFinding]:
+    """Flag overlapping placements on the base timeline."""
+    findings: list[ValidationFinding] = []
+    ordered = sorted(placements, key=lambda p: p.base_start)
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        overlap = min(left.base_end, right.base_end) - max(left.base_start, right.base_start)
+        if overlap >= min_overlap_seconds:
+            findings.append(
+                ValidationFinding(
+                    code="placement_overlap",
+                    severity=FindingSeverity.ERROR,
+                    message=(
+                        f"Placements overlap by {overlap:.3f}s on the base timeline."
+                    ),
+                    timeline="base",
+                    start=max(left.base_start, right.base_start),
+                    end=min(left.base_end, right.base_end),
+                )
+            )
+    return findings
+
+
+def base_coverage(
+    placements: list[Placement],
+    *,
+    base_duration: float,
+    explained_gaps: list[tuple[float, float]] | None = None,
+    min_gap_seconds: float = 0.5,
+) -> tuple[CoverageSummary, list[ValidationFinding]]:
+    """Measure placement coverage and report unexplained base gaps."""
+    duration = max(0.0, float(base_duration))
+    covered_spans = _merge_intervals(
+        [(p.base_start, min(p.base_end, duration)) for p in placements if p.base_end > p.base_start]
+    )
+    covered = sum(end - start for start, end in covered_spans)
+    explained = _merge_intervals(list(explained_gaps or []))
+
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in covered_spans:
+        if start - cursor >= min_gap_seconds:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if duration - cursor >= min_gap_seconds:
+        gaps.append((cursor, duration))
+
+    findings: list[ValidationFinding] = []
+    hull_start = covered_spans[0][0] if covered_spans else 0.0
+    hull_end = covered_spans[-1][1] if covered_spans else 0.0
+    for gap_start, gap_end in gaps:
+        # Subtract explained (missing-base) coverage from this gap.
+        remaining = [(gap_start, gap_end)]
+        for exp_start, exp_end in explained:
+            next_remaining: list[tuple[float, float]] = []
+            for r_start, r_end in remaining:
+                if exp_end <= r_start or exp_start >= r_end:
+                    next_remaining.append((r_start, r_end))
+                    continue
+                if exp_start > r_start:
+                    next_remaining.append((r_start, exp_start))
+                if exp_end < r_end:
+                    next_remaining.append((exp_end, r_end))
+            remaining = next_remaining
+        for r_start, r_end in remaining:
+            length = r_end - r_start
+            if length < min_gap_seconds:
+                continue
+            # Leading/trailing silence (donor shorter/longer offset) is expected
+            # padding — info only. Interior holes need operator attention.
+            edge = r_end <= hull_start + 1e-9 or r_start >= hull_end - 1e-9
+            findings.append(
+                ValidationFinding(
+                    code="base_uncovered_edge" if edge else "unexplained_base_gap",
+                    severity=(
+                        FindingSeverity.INFO if edge else FindingSeverity.WARNING
+                    ),
+                    message=(
+                        f"Base timeline has {length:.2f}s without donor placement "
+                        + (
+                            "(outside placement hull; often shorter donor)."
+                            if edge
+                            else "and without a missing-base interval."
+                        )
+                    ),
+                    timeline="base",
+                    start=r_start,
+                    end=r_end,
+                )
+            )
+
+    gap_seconds = max(0.0, duration - covered)
+    ratio = 0.0 if duration <= 1e-9 else max(0.0, min(1.0, covered / duration))
+    summary = CoverageSummary(
+        base_duration_seconds=duration,
+        covered_seconds=covered,
+        gap_seconds=gap_seconds,
+        coverage_ratio=ratio,
+    )
+    return summary, findings
+
+def low_confidence_findings(
+    doc: AlignmentDocument,
+    *,
+    threshold: float,
+) -> tuple[list[dict[str, float | bool]], list[ValidationFinding]]:
+    """List segments below the confidence threshold."""
+    rows: list[dict[str, float | bool]] = []
+    findings: list[ValidationFinding] = []
+    for segment in doc.segments:
+        if segment.confidence >= threshold and segment.reliable:
+            continue
+        rows.append(
+            {
+                "base_start": segment.base_start,
+                "base_end": segment.base_end,
+                "confidence": segment.confidence,
+                "reliable": segment.reliable,
+            }
+        )
+        if segment.confidence < threshold:
+            findings.append(
+                ValidationFinding(
+                    code="low_confidence_segment",
+                    severity=FindingSeverity.WARNING,
+                    message=(
+                        f"Segment confidence {segment.confidence:.3f} "
+                        f"is below threshold {threshold:.3f}."
+                    ),
+                    timeline="base",
+                    start=segment.base_start,
+                    end=segment.base_end,
+                )
+            )
+        if not segment.reliable:
+            findings.append(
+                ValidationFinding(
+                    code="unreliable_segment",
+                    severity=FindingSeverity.WARNING,
+                    message="Segment marked unreliable.",
+                    timeline="base",
+                    start=segment.base_start,
+                    end=segment.base_end,
+                )
+            )
+    return rows, findings
+
+
+def duration_mismatch_finding(
+    *,
+    base_duration: float,
+    output_duration: float,
+    tolerance_seconds: float,
+) -> ValidationFinding | None:
+    """Flag reconstructed WAV length vs requested base duration."""
+    delta = abs(float(output_duration) - float(base_duration))
+    if delta <= tolerance_seconds:
+        return None
+    return ValidationFinding(
+        code="duration_mismatch",
+        severity=FindingSeverity.ERROR,
+        message=(
+            f"Output duration {output_duration:.3f}s differs from base duration "
+            f"{base_duration:.3f}s by {delta:.3f}s "
+            f"(tolerance {tolerance_seconds:.3f}s)."
+        ),
+    )
+
+
+def alignment_status_findings(doc: AlignmentDocument) -> list[ValidationFinding]:
+    """Findings from alignment strategy / uncertain regions."""
+    findings: list[ValidationFinding] = []
+    if doc.strategy == SyncStrategyLevel.FAILED:
+        findings.append(
+            ValidationFinding(
+                code="alignment_failed",
+                severity=FindingSeverity.ERROR,
+                message="Alignment strategy is failed.",
+            )
+        )
+    for interval in doc.uncertain_intervals:
+        findings.append(
+            ValidationFinding(
+                code="uncertain_interval",
+                severity=FindingSeverity.WARNING,
+                message=f"Uncertain region ({interval.reason}).",
+                timeline=interval.timeline,
+                start=interval.start,
+                end=interval.end,
+            )
+        )
+    for interval in doc.missing_base_intervals:
+        findings.append(
+            ValidationFinding(
+                code="missing_base_interval",
+                severity=FindingSeverity.INFO,
+                message=(
+                    f"Missing base content ({interval.reason}); "
+                    "fill from base track 0 if long enough."
+                ),
+                timeline=interval.timeline,
+                start=interval.start,
+                end=interval.end,
+            )
+        )
+    for interval in doc.unrelated_donor_intervals:
+        findings.append(
+            ValidationFinding(
+                code="unrelated_donor_interval",
+                severity=FindingSeverity.INFO,
+                message=f"Unrelated donor span excluded ({interval.reason}).",
+                timeline=interval.timeline,
+                start=interval.start,
+                end=interval.end,
+            )
+        )
+    return findings
+
+
+def skipped_segment_findings(
+    result: ReconstructionResult,
+) -> list[ValidationFinding]:
+    """Note segments dropped during placement planning."""
+    if not result.skipped_segments:
+        return []
+    return [
+        ValidationFinding(
+            code="skipped_segments",
+            severity=FindingSeverity.WARNING,
+            message=f"{len(result.skipped_segments)} alignment segment(s) were not placed.",
+        )
+    ]

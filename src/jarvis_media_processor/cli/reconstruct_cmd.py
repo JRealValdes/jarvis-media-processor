@@ -12,6 +12,7 @@ from jarvis_media_processor.audio import FFmpegNotFoundError
 from jarvis_media_processor.config import get_settings
 from jarvis_media_processor.media import MediaFileNotFoundError
 from jarvis_media_processor.reconstruct import reconstruct_donor_audio
+from jarvis_media_processor.report.models import ProcessingReport
 
 
 def reconstruct_command(
@@ -54,3 +55,10 @@ def reconstruct_command(
         raise typer.Exit(code=1) from exc
 
     typer.echo(result.model_dump_json(indent=2))
+    report_path = work / "processing_report.json"
+    if report_path.is_file():
+        report = ProcessingReport.model_validate_json(
+            report_path.read_text(encoding="utf-8")
+        )
+        typer.echo("---")
+        typer.echo(report.summary_text().rstrip())
