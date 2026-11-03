@@ -107,14 +107,17 @@ Closes #<N>.
 
 ## 6. Merge and branch cleanup (after confirmation)
 
+Always squash-merge into `main` (one commit on `main` per PR):
+
 ```bash
-gh pr merge <PR> --merge   # or --squash if the user prefers
+gh pr merge <PR> --squash --delete-branch
 git fetch --prune
 git checkout main
 git pull origin main
-git push origin --delete feature/<N>-<slug>   # if remote branch still exists
-git branch -d feature/<N>-<slug>              # -D only if needed after squash/rebase
+git branch -d feature/<N>-<slug>   # -D is OK after squash if Git says not fully merged
 ```
+
+`--delete-branch` removes the remote feature branch. If the remote branch remains, delete it with `git push origin --delete feature/<N>-<slug>`.
 
 End on `main` with a clean working tree matching `origin/main`.
 
@@ -127,5 +130,5 @@ End on `main` with a clean working tree matching `origin/main`.
 - [ ] Issue body updated only when useful
 - [ ] When done + committed: propose push → PR → merge → branch cleanup
 - [ ] PR title ends with (#N); body links Closes/Refs #N
-- [ ] After confirmed merge: remote/local feature branches removed; on main and pulled
+- [ ] After confirmed merge: squash-merge only; remote/local feature branches removed; on main and pulled
 ```

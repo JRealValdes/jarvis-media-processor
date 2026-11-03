@@ -48,7 +48,7 @@ As soon as the issue work is **complete**, verified, and **all related changes a
 
 1. **Push** the feature branch to `origin`
 2. **Open a PR** into `main` (title ends with `(#X)`; body links `Closes #X` when the issue is fully done)
-3. **Merge** the PR into `main` (after checks are green / user is satisfied)
+3. **Squash-merge** the PR into `main` (after checks are green / user is satisfied) — always `gh pr merge --squash`, never a merge commit
 4. **Branch cleanup** — delete remote feature branch if it remains, delete local feature branch, check out `main`, pull/prune
 
 Propose this chain in one short message. **Do not** push, open the PR, merge, or delete branches until the user confirms (they may confirm the whole chain at once).
@@ -67,7 +67,11 @@ Once a PR is **merged**, remove the feature branch as part of the confirmed clos
 2. **Local** — switch to `main`, then delete the local feature branch (`git branch -d feature/<N>-…`). Prune stale remote-tracking refs (`git fetch --prune`) when useful.
 3. Leave the working tree on `main` and **`git pull`** (or `git pull origin main`) so local `main` matches the merge just landed.
 
-Prefer `git branch -d` (safe delete). After a squash/rebase merge, Git may claim the branch is “not fully merged”; if the PR is merged and the user confirmed cleanup, `git branch -D` is OK.
+Prefer `git branch -d` (safe delete). After squash-merge, Git may claim the branch is “not fully merged”; if the PR is merged and the user confirmed cleanup, `git branch -D` is OK.
+
+## Merge strategy
+
+PRs into `main` are **always squash-merged** (`gh pr merge <PR> --squash`). Do not use `--merge` or `--rebase` unless the user explicitly asks otherwise.
 
 ## Out of scope here
 
