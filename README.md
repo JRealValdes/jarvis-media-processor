@@ -104,6 +104,34 @@ Place donor audio onto the base timeline (silence in gaps; no shifting):
 uv run jmp reconstruct path/to/donor.mkv .jmp/alignment/alignment.json --base-duration 7200 -w .jmp/reconstruct
 ```
 
+### End-to-end graft pipeline
+
+Typical path from a base/donor pair to a playable MKV:
+
+```text
+align → reconstruct → fine-warp → mux
+```
+
+```bash
+uv run jmp align path/to/base.mkv path/to/donor.mkv -w .jmp/job
+# use base duration from inspect/ffprobe
+uv run jmp reconstruct path/to/donor.mkv .jmp/job/alignment.json --base-duration 7200 -w .jmp/job/reconstruct
+uv run jmp fine-warp path/to/base.mkv .jmp/job/reconstruct/donor_on_base.wav -w .jmp/job/fine-warp
+uv run jmp mux path/to/base.mkv .jmp/job/fine-warp/donor_on_base_fine.wav -o out.mkv
+```
+
+`fine-warp` is optional but recommended when lip-sync is close but not exact after reconstruct. It compares the reconstructed WAV to **base audio track 0**, builds a dense residual lag field from band-limited **onset** envelopes (not dialogue landmark snapping), keeps only high-confidence “pillars”, and interpolates elsewhere. Design notes and failure playbook: [docs/fine-warp.md](docs/fine-warp.md).
+
+### Mux
+
+Stream-copy base A/V and attach the reconstructed (or fine-warped) donor audio as an extra track:
+
+```bash
+uv run jmp mux path/to/base.mkv path/to/donor_on_base.wav -o out.mkv
+uv run jmp mux path/to/base.mkv path/to/donor_on_base_fine.wav -o out.mkv \
+  --donor-language spa --donor-title "Spanish (reconstructed)"
+```
+
 ## Development
 
 ```bash
@@ -130,6 +158,7 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 | `JMP_WORK_DIR` | `.jmp` | Temp / job workspace root |
 | `JMP_FFMPEG_PATH` | `ffmpeg` | FFmpeg executable |
 | `JMP_FFPROBE_PATH` | `ffprobe` | FFprobe executable |
+| `JMP_FINE_WARP_*` | (see Settings) | Dense residual lag field after reconstruct — [docs/fine-warp.md](docs/fine-warp.md) |
 
 ## Package layout
 
@@ -137,13 +166,13 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 src/jarvis_media_processor/
   cli/           # Typer CLI (jmp)
   config/        # Typed settings
-  media/         # Inspection (planned)
-  audio/         # Extraction + landmarks (planned)
-  video/         # Frame matching (planned)
-  alignment/     # Sync model (planned)
-  reconstruct/   # Donor audio on base timeline (planned)
-  output/        # MKV mux (planned)
-  validate/      # Reports (planned)
+  media/         # Inspection
+  audio/         # Extraction, landmarks, WAV I/O
+  video/         # Frame matching / activity
+  alignment/     # Sync model + curve walk
+  reconstruct/   # Donor on base timeline + fine-warp
+  output/        # MKV mux
+  report/        # Processing reports / validation
   jobs/          # Job runner (planned)
   api/           # HTTP API (planned)
 ```

@@ -186,6 +186,51 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Post-reconstruct dense lag field (base track 0 vs reconstructed WAV)
+    fine_warp_max_lag_seconds: float = Field(
+        default=1.0,
+        description="Maximum |lag| searched per window (residual after reconstruct).",
+    )
+    fine_warp_window_seconds: float = Field(
+        default=4.0,
+        description="Onset-envelope window length when estimating local lag.",
+    )
+    fine_warp_step_seconds: float = Field(
+        default=2.0,
+        description="Step between dense analysis window centers.",
+    )
+    fine_warp_context_window_seconds: float = Field(
+        default=10.0,
+        description="Wider window used to score big-picture improvement vs lag=0.",
+    )
+    fine_warp_prior_weight: float = Field(
+        default=0.02,
+        description="Light blend of pillar lags toward the pillar-median lag.",
+    )
+    fine_warp_smooth_seconds: float = Field(
+        default=20.0,
+        description="Temporal smoothing radius among high-confidence lag pillars.",
+    )
+    fine_warp_confidence_tau: float = Field(
+        default=0.08,
+        description="Minimum confidence for a step to count as a lag pillar.",
+    )
+    fine_warp_min_pillar_score: float = Field(
+        default=0.4,
+        description=(
+            "Minimum absolute onset correlation to be a pillar "
+            "(rejects weak cross-language false peaks)."
+        ),
+    )
+    fine_warp_band_low_hz: float = Field(
+        default=300.0,
+        description="High-pass corner before onset envelope (reduce dialogue body).",
+    )
+    fine_warp_band_high_hz: float = Field(
+        default=6000.0,
+        description="Low-pass corner before onset envelope.",
+    )
+
     # Processing report / manual-review thresholds
     report_low_confidence: float = Field(
         default=0.45,
