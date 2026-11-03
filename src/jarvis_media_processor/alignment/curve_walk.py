@@ -154,11 +154,18 @@ def _backwards_refine_lock(
     hop: float,
     min_score: float,
 ) -> CurveLock:
-    """Walk backwards from a lock to the earliest still-matching coincidence."""
+    """Walk backwards from a lock to the earliest still-matching coincidence.
+
+    Stops when the local score falls well below the lock quality. A weak
+    absolute floor alone walks into leading credits / grade mismatch and can
+    turn a strong mid-timeline lock into a marginal head hit.
+    """
     speed = lock.speed
     offset = lock.offset_seconds
     base_t = lock.base_time
     best = lock
+    # Stay near the lock's own confidence; never below the caller floor.
+    quality_floor = max(float(min_score), float(lock.score) * 0.75)
     t = base_t - hop
     floor = float(base.times[0]) + half_window
     while t >= floor:
@@ -171,7 +178,7 @@ def _backwards_refine_lock(
             speed=speed,
             half_window=half_window,
             period=period,
-            min_score=min_score,
+            min_score=quality_floor,
         )
         if scored is None:
             break
@@ -192,12 +199,11 @@ def find_initial_lock(
 ) -> CurveLock | None:
     """Find the first base↔donor coincidence via chronological curve search.
 
-    Locks on activity derivatives (cross-encode safe). Frame confirmation for
-    picture identity lives in ``match_frames_two_phase``; ``frame_confirm`` is
-    accepted for API compatibility but not required to accept a curve lock —
-    requiring pHash here preferred late false locks on grade-mismatched pairs.
+    Locks on activity derivatives (cross-encode safe). Strong activity locks
+    are accepted without frames. Marginal locks (score < 0.5) require picture
+    support when ``frame_confirm`` is available — otherwise a weak wrong-speed
+    head hit can derail the whole walk on grade-mismatched pairs.
     """
-    _ = frame_confirm
     period = float(np.median([base.sample_period, donor.sample_period])) or 1.0
     hop = max(period, 2.0)
     base_start = float(base.times[0]) + half_window
@@ -225,7 +231,7 @@ def find_initial_lock(
             frame_confirm=None,
         ):
             return None
-        return _backwards_refine_lock(
+        refined = _backwards_refine_lock(
             base,
             donor,
             lock,
@@ -234,6 +240,18 @@ def find_initial_lock(
             hop=hop,
             min_score=min_score * 0.8,
         )
+        if refined is None:
+            return None
+        # Strong curve agreement stands alone (cross-encode safe). Marginal
+        # hits need a frame vote when available so a 0.38 wrong-speed lock at
+        # the donor head cannot beat a later true ~0.7 lock.
+        if refined.score >= 0.5:
+            return refined
+        if frame_confirm is None:
+            return refined
+        if frame_confirm(refined.base_time, refined.donor_time):
+            return refined
+        return None
 
     def _best_of(candidates: list[CurveLock]) -> CurveLock | None:
         if not candidates:

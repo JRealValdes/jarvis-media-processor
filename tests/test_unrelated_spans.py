@@ -223,6 +223,39 @@ def test_curve_walk_prefers_long_surplus_over_short_false_peak() -> None:
     )
 
 
+def test_backwards_refine_preserves_lock_quality() -> None:
+    """Backwards refine must not walk into a weak head and collapse the score."""
+    from jarvis_media_processor.alignment.curve_walk import (
+        CurveLock,
+        _backwards_refine_lock,
+    )
+
+    # Matching pulse train only after t=40; earlier samples are near-zero noise
+    # that can still clear a very low absolute floor.
+    base = _pulse_envelope(100, list(range(42, 90, 3)))
+    donor = _pulse_envelope(100, list(range(42, 90, 3)))
+    lock = CurveLock(
+        speed=1.0,
+        offset_seconds=0.0,
+        base_time=48.0,
+        donor_time=48.0,
+        score=1.0,
+    )
+    refined = _backwards_refine_lock(
+        base,
+        donor,
+        lock,
+        half_window=5.0,
+        period=1.0,
+        hop=2.0,
+        min_score=0.2,
+    )
+    # May step one hop before the first pulse (half-window overlap) but must
+    # not collapse into the empty head.
+    assert refined.base_time >= 36.0
+    assert refined.score >= 0.7
+
+
 def test_initial_lock_takes_earliest_confirm_not_max_score() -> None:
     """A later louder peak against the donor head must not hide an early lock."""
     # Shared early pulse train (true lock ~ offset 0). Later, a single huge
