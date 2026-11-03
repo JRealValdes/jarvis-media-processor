@@ -244,9 +244,12 @@ def find_initial_lock(
         if r not in radii:
             radii.append(r)
 
-    # Ring 0 — donor head across chronological base times.
+    # Ring 0 — donor head, chronological per speed. Take the *first* base
+    # time that confirms (not the global max score): a later high-score false
+    # peak (e.g. base=88) must not hide an earlier true lock (base=42→32).
+    # Among speeds that confirm, prefer near-1.0 to avoid cascade false ads.
+    ring0_hits: list[CurveLock] = []
     for speed in speed_candidates:
-        best: CurveLock | None = None
         for base_t in anchors:
             cand = _score_lock(
                 base,
@@ -258,15 +261,16 @@ def find_initial_lock(
                 period=period,
                 min_score=min_score,
             )
-            if cand is None:
-                continue
-            if best is None or cand.score > best.score:
-                best = cand
-            if cand.score >= min_score + 0.1:
+            confirmed = _try_and_confirm(cand)
+            if confirmed is not None:
+                ring0_hits.append(confirmed)
                 break
-        confirmed = _try_and_confirm(best)
-        if confirmed is not None:
-            return confirmed
+    if ring0_hits:
+        # Earliest coincidence wins; among ties, prefer speed≈1 and higher score.
+        return min(
+            ring0_hits,
+            key=lambda c: (c.base_time, abs(c.speed - 1.0), -c.score),
+        )
 
     # Later rings — chronological base × expanding offset.
     for base_t in anchors:
@@ -316,12 +320,15 @@ def _confirm_lock(
 ) -> bool:
     """Require the lock to keep matching while walking a short stretch.
 
+    Uses mean score with a soft floor so a single noisy hop cannot reject a
+    otherwise solid near-1.0 speed lock (cross-encode activity is jittery).
+
     When ``frame_confirm`` is set, also require actual frames to agree on a
     majority of the confirm hops (derivative propose → frame confirm).
     """
     t = lock.base_time
     end = min(float(base.times[-1]) - half_window, t + confirm_seconds)
-    good = 0.0
+    scores: list[float] = []
     frame_checks = 0
     frame_hits = 0
     while t <= end:
@@ -337,15 +344,22 @@ def _confirm_lock(
             half_window=half_window,
             period=period,
         )
-        if score < min_score:
+        # Hard reject only total collapse; mild dips are OK if the mean holds.
+        if score < min_score * 0.55:
             return False
+        scores.append(score)
         if frame_confirm is not None:
             frame_checks += 1
             if frame_confirm(t, donor_t):
                 frame_hits += 1
-        good += hop
         t += hop
-    if good < confirm_seconds * 0.5:
+    if not scores:
+        return False
+    covered = len(scores) * hop
+    if covered < confirm_seconds * 0.5:
+        return False
+    mean_sc = float(np.mean(scores))
+    if mean_sc < min_score or min(scores) < min_score * 0.7:
         return False
     if frame_confirm is not None and frame_checks > 0:
         return frame_hits >= max(1, (frame_checks + 1) // 2)

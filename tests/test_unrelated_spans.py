@@ -5,7 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from jarvis_media_processor.alignment.curve_walk import walk_activity_curves
+from jarvis_media_processor.alignment.curve_walk import (
+    find_initial_lock,
+    walk_activity_curves,
+)
 from jarvis_media_processor.alignment.evidence import (
     TimePair,
     filter_pairs_excluding_donor,
@@ -70,6 +73,44 @@ def test_curve_walk_finds_inserted_ad_block() -> None:
         s.start <= ad0 + 10 and s.end >= ad1 - 10
         for s in result.unrelated_donor_intervals
     )
+
+
+def test_initial_lock_takes_earliest_confirm_not_max_score() -> None:
+    """A later louder peak against the donor head must not hide an early lock."""
+    # Shared early pulse train (true lock ~ offset 0). Later, a single huge
+    # base spike that correlates with donor head by chance at a wrong offset.
+    base_vals = np.zeros(100, dtype=np.float64)
+    donor_vals = np.zeros(100, dtype=np.float64)
+    for i in list(range(2, 30, 3)):
+        base_vals[i] = 1.0
+        base_vals[i + 1] = 0.45
+        donor_vals[i] = 1.0
+        donor_vals[i + 1] = 0.45
+    base_vals[70] = 1.0
+    base_vals[71] = 1.0
+    base_vals[72] = 1.0
+    donor_vals[6] = 1.0  # donor-head-ish energy for the false late correlation
+    base = ActivityEnvelope(
+        times=np.arange(100, dtype=np.float64),
+        values=base_vals,
+        sample_period=1.0,
+    )
+    donor = ActivityEnvelope(
+        times=np.arange(100, dtype=np.float64),
+        values=donor_vals,
+        sample_period=1.0,
+    )
+    lock = find_initial_lock(
+        base,
+        donor,
+        half_window=5.0,
+        min_score=0.25,
+        max_offset_seconds=80.0,
+        speed_candidates=(1.0, 0.96),
+    )
+    assert lock is not None
+    assert lock.base_time < 40.0
+    assert abs(lock.offset_seconds) < 15.0
 
 
 def test_curve_lock_ignores_failed_frame_confirm() -> None:
