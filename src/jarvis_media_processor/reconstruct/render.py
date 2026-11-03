@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import resample
 
 from jarvis_media_processor.reconstruct.models import Placement
+
+# FFT-based ``scipy.signal.resample`` OOMs on multi-minute film chunks
+# (needs ~O(n) complex buffers). Linear interp in blocks stays O(block).
+_STRETCH_BLOCK = 1_000_000
 
 
 def _slice_samples(
@@ -38,18 +41,32 @@ def _time_stretch(
     target_duration: float,
     sample_rate: int,
 ) -> NDArray[np.float64]:
-    """Stretch/compress audio to ``target_duration`` via resampling.
+    """Stretch/compress audio to ``target_duration`` via linear resampling.
 
-    For mild speed changes this approximates ``atempo`` well enough for tests
-    and first reconstruction passes. Large ratios may sound unnatural.
+    Mild speed changes (e.g. 0.96×) sound fine for reconstruction; avoids the
+    memory spike of an FFT resample on hour-scale placements.
     """
+    _ = source_duration  # duration implied by chunk length / sample_rate
     target_n = max(1, int(round(target_duration * sample_rate)))
-    if chunk.shape[-1] == 0:
-        return np.zeros((chunk.shape[0], target_n), dtype=np.float64)
-    if abs(source_duration - target_duration) < 1e-6 and chunk.shape[-1] == target_n:
+    channels = int(chunk.shape[0])
+    source_n = int(chunk.shape[-1])
+    if source_n == 0:
+        return np.zeros((channels, target_n), dtype=np.float64)
+    if source_n == target_n:
         return chunk
-    stretched = resample(chunk, target_n, axis=-1)
-    return np.asarray(stretched, dtype=np.float64)
+    out = np.empty((channels, target_n), dtype=np.float64)
+    # pos = index in source for each output sample (linear map).
+    scale = float(source_n) / float(target_n)
+    for start in range(0, target_n, _STRETCH_BLOCK):
+        end = min(target_n, start + _STRETCH_BLOCK)
+        pos = (np.arange(start, end, dtype=np.float64) + 0.5) * scale - 0.5
+        np.clip(pos, 0.0, float(source_n - 1), out=pos)
+        i0 = np.floor(pos).astype(np.int64)
+        i1 = np.minimum(i0 + 1, source_n - 1)
+        frac = pos - i0.astype(np.float64)
+        for c in range(channels):
+            out[c, start:end] = chunk[c, i0] * (1.0 - frac) + chunk[c, i1] * frac
+    return out
 
 
 def _apply_edges(
@@ -75,7 +92,7 @@ def render_placements(
     placements: list[Placement],
     *,
     base_duration: float,
-) -> NDArray[np.float64]:
+) -> NDArray[np.floating]:
     """Mix placements onto a zero canvas of ``base_duration``.
 
     Missing intervals remain silence and do not shift later content.
@@ -83,7 +100,8 @@ def render_placements(
     donor = _ensure_2d(donor_samples)
     channels = donor.shape[0]
     total = max(1, int(round(base_duration * sample_rate)))
-    canvas = np.zeros((channels, total), dtype=np.float64)
+    # float32 canvas: a 2h stereo 48 kHz float64 buffer is ~5.6 GiB alone.
+    canvas = np.zeros((channels, total), dtype=np.float32)
 
     for placement in placements:
         donor_chunk = _slice_samples(
@@ -109,12 +127,14 @@ def render_placements(
         length = end_i - start_i
         if length <= 0:
             continue
-        canvas[:, start_i:end_i] += stretched[:, :length]
+        canvas[:, start_i:end_i] += stretched[:, :length].astype(
+            np.float32, copy=False
+        )
 
     # Soft clip to [-1, 1]
-    peak = np.max(np.abs(canvas)) if canvas.size else 0.0
+    peak = float(np.max(np.abs(canvas))) if canvas.size else 0.0
     if peak > 1.0:
-        canvas = canvas / peak
+        canvas = canvas / np.float32(peak)
     return canvas
 
 
