@@ -186,6 +186,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Processing report / manual-review thresholds
+    report_low_confidence: float = Field(
+        default=0.45,
+        description="Segment confidence below this is listed and can force review.",
+    )
+    report_min_global_confidence: float = Field(
+        default=0.35,
+        description="Alignment confidence below this sets needs_manual_review.",
+    )
+    report_duration_tolerance_seconds: float = Field(
+        default=0.25,
+        description="Allowed |output_duration - base_duration| before a finding.",
+    )
+    report_min_gap_seconds: float = Field(
+        default=0.5,
+        description="Base coverage holes shorter than this are ignored.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
