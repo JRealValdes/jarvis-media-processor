@@ -140,6 +140,51 @@ class Settings(BaseSettings):
         default=0.05,
         description="Minimum cross-corr score required to apply the audio fine-offset.",
     )
+    alignment_unrelated_window_seconds: float = Field(
+        default=12.0,
+        description="Half-window (seconds) when comparing local activity curves.",
+    )
+    alignment_unrelated_hop_seconds: float = Field(
+        default=2.0,
+        description="Step (seconds) while walking activity curves forward.",
+    )
+    alignment_unrelated_search_seconds: float = Field(
+        default=1200.0,
+        description=(
+            "Deprecated alias retained for env compatibility; prefer "
+            "alignment_unrelated_max_surplus_seconds."
+        ),
+    )
+    alignment_unrelated_min_score: float = Field(
+        default=0.3,
+        description="Minimum local curve-match score to accept a lock or resume.",
+    )
+    alignment_unrelated_lag_jump_seconds: float = Field(
+        default=2.0,
+        description="Legacy setting; curve walk expands offsets itself.",
+    )
+    alignment_unrelated_min_span_seconds: float = Field(
+        default=8.0,
+        description="Ignore surplus-donor spans shorter than this.",
+    )
+    alignment_unrelated_max_surplus_seconds: float = Field(
+        default=1200.0,
+        description=(
+            "Maximum donor surplus / ad length to search when resuming after a "
+            "curve break (default 20 minutes)."
+        ),
+    )
+    alignment_curve_confirm_seconds: float = Field(
+        default=6.0,
+        description="How long curves must disagree before declaring a break.",
+    )
+    alignment_missing_base_fill_seconds: float = Field(
+        default=3.0,
+        description=(
+            "Missing-base gaps at least this long are filled from the base "
+            "file's first audio track at reconstruct time."
+        ),
+    )
 
 
 @lru_cache(maxsize=1)

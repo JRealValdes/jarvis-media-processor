@@ -116,3 +116,52 @@ def render_placements(
     if peak > 1.0:
         canvas = canvas / peak
     return canvas
+
+
+def fill_missing_base_audio(
+    canvas: NDArray[np.floating],
+    base_samples: NDArray[np.floating],
+    sample_rate: int,
+    intervals: list,
+    *,
+    min_seconds: float = 3.0,
+    crossfade_seconds: float = 0.01,
+) -> NDArray[np.float64]:
+    """Copy base track audio into long missing-base gaps on the canvas.
+
+    Used when the donor lacks scenes that exist on the base timeline (deleted /
+    undubbed / missing credits). Gaps shorter than ``min_seconds`` stay silent.
+    """
+    out = _ensure_2d(canvas).copy()
+    base = _ensure_2d(base_samples)
+    # Match channel count (duplicate mono → stereo if needed).
+    if base.shape[0] == 1 and out.shape[0] > 1:
+        base = np.repeat(base, out.shape[0], axis=0)
+    elif base.shape[0] > out.shape[0]:
+        base = base[: out.shape[0], :]
+    fade = int(round(crossfade_seconds * sample_rate))
+    total = out.shape[-1]
+    for item in intervals:
+        timeline = getattr(item, "timeline", "base")
+        if timeline != "base":
+            continue
+        start = float(getattr(item, "start", 0.0))
+        end = float(getattr(item, "end", 0.0))
+        if end - start < min_seconds - 1e-9:
+            continue
+        chunk = _slice_samples(base, sample_rate, start, end)
+        chunk = _ensure_2d(chunk)
+        if chunk.shape[-1] == 0:
+            continue
+        chunk = _apply_edges(chunk, fade_samples=fade)
+        start_i = max(0, int(round(start * sample_rate)))
+        end_i = min(total, start_i + chunk.shape[-1])
+        length = end_i - start_i
+        if length <= 0:
+            continue
+        # Replace (do not add) so we don't mix with residual donor bleed.
+        out[:, start_i:end_i] = chunk[:, :length]
+    peak = np.max(np.abs(out)) if out.size else 0.0
+    if peak > 1.0:
+        out = out / peak
+    return out

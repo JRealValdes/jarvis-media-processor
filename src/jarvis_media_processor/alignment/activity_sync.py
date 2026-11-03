@@ -54,8 +54,8 @@ def estimate_offset_crosscorr(
     period = float(np.median([base.sample_period, donor.sample_period]))
     if period <= 0:
         period = 1.0
-    _bt, base_v = _resample_to_period(base, period)
-    _dt, donor_v = _resample_to_period(donor, period)
+    bt, base_v = _resample_to_period(base, period)
+    dt, donor_v = _resample_to_period(donor, period)
     if base_v.size < 4 or donor_v.size < 4:
         return ActivitySyncResult(speed=1.0, offset_seconds=0.0, score=0.0, method="crosscorr")
 
@@ -71,9 +71,11 @@ def estimate_offset_crosscorr(
         0.0,
         min(1.0, abs(peak) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)),
     )
+    # Account for envelope origins so sliced chunks (ads excised) stay correct.
+    origin_shift = float(dt[0] - bt[0]) if bt.size and dt.size else 0.0
     return ActivitySyncResult(
         speed=1.0,
-        offset_seconds=-float(lag) * period,
+        offset_seconds=origin_shift - float(lag) * period,
         score=score,
         method="crosscorr",
     )
@@ -95,12 +97,15 @@ def estimate_speed_offset_activity(
     period = float(np.median([base.sample_period, donor.sample_period]))
     if period <= 0:
         period = 1.0
-    _bt, base_v = _resample_to_period(base, period)
+    bt, base_v = _resample_to_period(base, period)
     if base_v.size < 4 or donor.values.size < 4:
         return estimate_offset_crosscorr(base, donor)
 
     best = estimate_offset_crosscorr(base, donor)
     a = normalize_activity(base_v)
+    origin_shift = (
+        float(donor.times[0] - bt[0]) if bt.size and donor.times.size else 0.0
+    )
 
     for speed in np.linspace(speed_min, speed_max, speed_steps):
         # Compress/expand donor timeline: length scales with 1/speed relative to base clock.
@@ -125,7 +130,7 @@ def estimate_speed_offset_activity(
         if tie > best_tie:
             best = ActivitySyncResult(
                 speed=float(speed),
-                offset_seconds=-float(lag) * period,
+                offset_seconds=origin_shift - float(lag) * period,
                 score=score,
                 method="activity_speed_grid",
             )
@@ -140,21 +145,36 @@ def activity_time_pairs(
     peak_prominence: float = 0.12,
     pair_tolerance: float = 2.0,
     weight: float = 1.2,
+    exclude_donor_intervals: list[tuple[float, float]] | None = None,
 ) -> list[TimePair]:
     """Build visual evidence pairs from activity peaks under a global model.
 
     Peaks on the base envelope are mapped with ``donor ≈ speed * base + offset``
     and matched to the nearest donor peak within ``pair_tolerance`` seconds.
+    Donor times inside ``exclude_donor_intervals`` are skipped.
     """
     result = sync or estimate_speed_offset_activity(base, donor)
+    excluded = exclude_donor_intervals or []
+
+    def _excluded(donor_time: float) -> bool:
+        for start, end in excluded:
+            if start - 1e-9 <= donor_time <= end + 1e-9:
+                return True
+        return False
+
     base_peaks = activity_peak_times(base, min_prominence=peak_prominence)
-    donor_peaks = activity_peak_times(donor, min_prominence=peak_prominence)
+    donor_peaks = [
+        t for t in activity_peak_times(donor, min_prominence=peak_prominence)
+        if not _excluded(t)
+    ]
     if not base_peaks or not donor_peaks:
         # Fall back to dense envelope samples as soft pairs along the model.
         pairs: list[TimePair] = []
         step = max(1, len(base.times) // 40)
         for t in base.times[::step]:
             d = float(result.speed * t + result.offset_seconds)
+            if _excluded(d):
+                continue
             if donor.times.size and donor.times[0] - 1 <= d <= donor.times[-1] + 1:
                 pairs.append(
                     TimePair(
@@ -170,8 +190,12 @@ def activity_time_pairs(
     pairs = []
     for bt in base_peaks:
         expected = float(result.speed * bt + result.offset_seconds)
+        if _excluded(expected):
+            continue
         j = int(np.argmin(np.abs(donor_arr - expected)))
         dt = float(donor_arr[j])
+        if _excluded(dt):
+            continue
         if abs(dt - expected) <= pair_tolerance:
             pairs.append(
                 TimePair(

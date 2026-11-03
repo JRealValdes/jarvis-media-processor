@@ -82,8 +82,15 @@ def fit_speed_offset(
         if len(inliers) < 2:
             continue
         rmse = float(np.sqrt(np.mean(residuals[inlier_mask] ** 2)))
-        score = (len(inliers), -abs(speed - 1.0), -rmse)
-        if best is None or score > (len(best.inliers), -abs(best.speed - 1.0), -best.rmse):
+        # Prefer coverage and RMSE over "near 1.0". Biasing toward speed=1
+        # made cross-encode post-ad windows pick 0.98 (then rejected as ≈1)
+        # instead of the true 0.96 map with lower error.
+        score = (len(inliers), -rmse, -abs(speed - 1.0))
+        if best is None or score > (
+            len(best.inliers),
+            -best.rmse,
+            -abs(best.speed - 1.0),
+        ):
             best = FitResult(speed=float(speed), offset=offset, inliers=inliers, rmse=rmse)
     return best
 
@@ -254,7 +261,13 @@ def estimate_alignment(
         )
 
     offset_fit = fit_offset(pairs, inlier_tolerance=inlier_tolerance)
-    if (
+    speed_fit = fit_speed_offset(
+        pairs,
+        inlier_tolerance=inlier_tolerance,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
+    offset_ok = bool(
         offset_fit
         and _accepts(
             offset_fit.inliers,
@@ -268,7 +281,65 @@ def estimate_alignment(
             tolerance=inlier_tolerance,
             min_coverage=min_inlier_ratio,
         )
-    ):
+    )
+    speed_ok = bool(
+        speed_fit
+        and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
+        and abs(speed_fit.speed - 1.0) > speed_tolerance
+        and _monotonic_agrees(
+            pairs,
+            speed=speed_fit.speed,
+            offset=speed_fit.offset,
+            tolerance=inlier_tolerance,
+            min_coverage=min_inlier_ratio,
+        )
+    )
+    # Prefer a non-1.0 speed model when it clearly explains more pairs. A short
+    # post-ad window can look like donor≈base-19 at speed 1.0 while the true
+    # cross-encode map is speed≈0.96 with a different offset; accepting offset
+    # first hid that.
+    prefer_speed = False
+    if offset_ok and speed_ok:
+        assert offset_fit is not None and speed_fit is not None
+        off_n = len(_injective_inliers(offset_fit.inliers))
+        sp_n = len(_injective_inliers(speed_fit.inliers))
+        prefer_speed = sp_n >= off_n + 2 or (
+            sp_n >= off_n and speed_fit.rmse <= offset_fit.rmse * 0.85
+        )
+    elif speed_ok and not offset_ok:
+        prefer_speed = True
+
+    if prefer_speed and speed_fit is not None:
+        conf = _confidence(
+            speed_fit.inliers,
+            base_anchor_count,
+            speed_fit.rmse,
+            inlier_tolerance,
+        )
+        segment = _full_span_segment(
+            speed_fit.inliers,
+            speed=speed_fit.speed,
+            offset=speed_fit.offset,
+            confidence=conf,
+            base_duration=base_duration,
+            donor_duration=donor_duration,
+        )
+        return AlignmentDocument(
+            strategy=SyncStrategyLevel.CONSTANT_SPEED,
+            confidence=conf,
+            global_offset_seconds=speed_fit.offset,
+            global_speed=speed_fit.speed,
+            segments=[segment],
+            notes=[f"Accepted speed={speed_fit.speed:.4f}, offset={speed_fit.offset:.3f}s."],
+            evidence={
+                "pair_count": total,
+                "base_anchors": base_anchor_count,
+                "inliers": len(speed_fit.inliers),
+                "rmse": round(speed_fit.rmse, 4),
+            },
+        )
+
+    if offset_ok and offset_fit is not None:
         conf = _confidence(
             offset_fit.inliers,
             base_anchor_count,
@@ -304,53 +375,6 @@ def estimate_alignment(
             },
         )
 
-    speed_fit = fit_speed_offset(
-        pairs,
-        inlier_tolerance=inlier_tolerance,
-        speed_min=speed_min,
-        speed_max=speed_max,
-    )
-    if (
-        speed_fit
-        and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
-        and abs(speed_fit.speed - 1.0) > speed_tolerance
-        and _monotonic_agrees(
-            pairs,
-            speed=speed_fit.speed,
-            offset=speed_fit.offset,
-            tolerance=inlier_tolerance,
-            min_coverage=min_inlier_ratio,
-        )
-    ):
-        conf = _confidence(
-            speed_fit.inliers,
-            base_anchor_count,
-            speed_fit.rmse,
-            inlier_tolerance,
-        )
-        segment = _full_span_segment(
-            speed_fit.inliers,
-            speed=speed_fit.speed,
-            offset=speed_fit.offset,
-            confidence=conf,
-            base_duration=base_duration,
-            donor_duration=donor_duration,
-        )
-        return AlignmentDocument(
-            strategy=SyncStrategyLevel.CONSTANT_SPEED,
-            confidence=conf,
-            global_offset_seconds=speed_fit.offset,
-            global_speed=speed_fit.speed,
-            segments=[segment],
-            notes=[f"Accepted speed={speed_fit.speed:.4f}, offset={speed_fit.offset:.3f}s."],
-            evidence={
-                "pair_count": total,
-                "base_anchors": base_anchor_count,
-                "inliers": len(speed_fit.inliers),
-                "rmse": round(speed_fit.rmse, 4),
-            },
-        )
-
     notes.append("No single offset/speed hypothesis met inlier thresholds; using piecewise mapper.")
     return build_piecewise_alignment(
         pairs,
@@ -368,6 +392,160 @@ _GLOBAL_STRATEGIES = {
 }
 
 
+def estimate_alignment_per_donor_chunk(
+    pairs: list[TimePair],
+    donor_keep: list[tuple[float, float]],
+    *,
+    base_duration: float | None = None,
+    donor_duration: float | None = None,
+    inlier_tolerance: float = 1.5,
+    min_inlier_ratio: float = 0.55,
+    min_chunk_pairs: int = 6,
+    speed_min: float = 0.85,
+    speed_max: float = 1.2,
+    speed_tolerance: float = 0.03,
+) -> AlignmentDocument | None:
+    """Fit a global model inside each donor keep-range, then stitch segments.
+
+    Mid-roll ads create *multiple* legitimate offsets (pre-ad vs post-ad). A
+    single RANSAC over all pairs then falls to a noisy piecewise map. Fitting
+    per complementary donor chunk recovers clean segments instead.
+    """
+    if not donor_keep or not pairs:
+        return None
+
+    segments: list[AlignmentSegment] = []
+    notes: list[str] = [
+        "Fitted timing per donor chunk outside unrelated spans.",
+    ]
+    confidences: list[float] = []
+    speeds: list[float] = []
+
+    for d0, d1 in donor_keep:
+        chunk_pairs = [
+            p for p in pairs if d0 - 1e-6 <= p.donor_time <= d1 + 1e-6
+        ]
+        if len(chunk_pairs) < min_chunk_pairs:
+            notes.append(
+                f"Chunk {d0:.1f}-{d1:.1f}s: skipped ({len(chunk_pairs)} pairs)."
+            )
+            continue
+        sub = estimate_alignment(
+            chunk_pairs,
+            base_duration=base_duration,
+            donor_duration=donor_duration,
+            inlier_tolerance=inlier_tolerance,
+            min_inlier_ratio=min_inlier_ratio,
+            speed_tolerance=speed_tolerance,
+            speed_min=speed_min,
+            speed_max=speed_max,
+        )
+        if sub.strategy not in _GLOBAL_STRATEGIES:
+            # Activity pairs from a bad mid-slice crosscorr can poison an otherwise
+            # clean pHash cluster — retry without activity evidence.
+            phash_only = [
+                p
+                for p in chunk_pairs
+                if not str(p.source).startswith("video_activity")
+            ]
+            if len(phash_only) >= min_chunk_pairs and len(phash_only) < len(chunk_pairs):
+                retry = estimate_alignment(
+                    phash_only,
+                    base_duration=base_duration,
+                    donor_duration=donor_duration,
+                    inlier_tolerance=inlier_tolerance,
+                    min_inlier_ratio=min_inlier_ratio,
+                    speed_tolerance=speed_tolerance,
+                    speed_min=speed_min,
+                    speed_max=speed_max,
+                )
+                if retry.strategy in _GLOBAL_STRATEGIES:
+                    sub = retry
+                    notes.append(
+                        f"Chunk {d0:.1f}-{d1:.1f}s: recovered via pHash-only fit."
+                    )
+        if sub.strategy not in _GLOBAL_STRATEGIES:
+            notes.append(
+                f"Chunk {d0:.1f}-{d1:.1f}s: no global fit ({sub.strategy.value})."
+            )
+            continue
+        speed = float(sub.global_speed if sub.global_speed is not None else 1.0)
+        offset = float(
+            sub.global_offset_seconds if sub.global_offset_seconds is not None else 0.0
+        )
+        # Map donor keep-range through the chunk model onto the base timeline.
+        b0 = (d0 - offset) / max(speed, 1e-6)
+        b1 = (d1 - offset) / max(speed, 1e-6)
+        if base_duration is not None:
+            b0 = min(max(0.0, b0), base_duration)
+            b1 = min(max(0.0, b1), base_duration)
+        if b1 <= b0 + 1e-3:
+            notes.append(f"Chunk {d0:.1f}-{d1:.1f}s: empty base span after map.")
+            continue
+        segments.append(
+            AlignmentSegment(
+                base_start=float(b0),
+                base_end=float(b1),
+                donor_start=float(d0),
+                donor_end=float(d1),
+                speed=speed,
+                offset_seconds=offset,
+                confidence=float(sub.confidence),
+                reliable=True,
+            )
+        )
+        confidences.append(float(sub.confidence))
+        speeds.append(speed)
+        notes.append(
+            f"Chunk {d0:.1f}-{d1:.1f}s: speed={speed:.4f} offset={offset:.3f}s "
+            f"(conf={sub.confidence:.2f})."
+        )
+
+    if not segments:
+        return None
+
+    segments.sort(key=lambda s: (s.base_start, s.donor_start))
+    mean_conf = float(sum(confidences) / len(confidences))
+    speed_span = max(speeds) - min(speeds) if speeds else 0.0
+    # Only call the map "global" when every keep-range fitted; a single
+    # successful chunk beside a failed post-ad chunk is still piecewise.
+    if len(segments) == 1 and len(donor_keep) == 1:
+        seg = segments[0]
+        strategy = (
+            SyncStrategyLevel.CONSTANT_SPEED
+            if abs(seg.speed - 1.0) > speed_tolerance
+            else SyncStrategyLevel.CONSTANT_OFFSET
+        )
+        return AlignmentDocument(
+            strategy=strategy,
+            confidence=mean_conf,
+            global_offset_seconds=seg.offset_seconds,
+            global_speed=seg.speed,
+            segments=segments,
+            notes=notes,
+            evidence={
+                "pair_count": len(pairs),
+                "donor_chunks": len(donor_keep),
+                "fitted_chunks": 1,
+            },
+        )
+
+    return AlignmentDocument(
+        strategy=SyncStrategyLevel.PIECEWISE,
+        confidence=mean_conf,
+        global_offset_seconds=None,
+        global_speed=float(sum(speeds) / len(speeds)) if speed_span < speed_tolerance else None,
+        segments=segments,
+        notes=notes,
+        evidence={
+            "pair_count": len(pairs),
+            "donor_chunks": len(donor_keep),
+            "fitted_chunks": len(segments),
+            "speed_span": round(speed_span, 4),
+        },
+    )
+
+
 def estimate_alignment_visual_first(
     visual_pairs: list[TimePair],
     audio_pairs: list[TimePair],
@@ -382,20 +560,74 @@ def estimate_alignment_visual_first(
     speed_min: float = 0.85,
     speed_max: float = 1.2,
     speed_tolerance: float = 0.03,
+    donor_exclude: list[tuple[float, float]] | None = None,
 ) -> AlignmentDocument:
     """Prefer a visual timing model; do not let weak audio override it.
 
     Policy:
-    1. If enough visual pairs exist, fit offset/speed/piecewise on **visual only**
-       with a looser tolerance (frame sampling).
-    2. Accept global visual models immediately; also prefer visual piecewise when
+    1. If ``donor_exclude`` spans exist, fit **per complementary donor chunk**
+       first (mid-roll ads ⇒ multiple legitimate offsets).
+    2. Else if enough visual pairs exist, fit offset/speed/piecewise on **visual
+       only** with a looser tolerance (frame sampling).
+    3. Accept global visual models immediately; also prefer visual piecewise when
        it is at least moderately confident.
-    3. Otherwise fall back to fused evidence with **downweighted** audio so dense
+    4. Otherwise fall back to fused evidence with **downweighted** audio so dense
        cross-language landmark noise cannot dominate.
     """
     from jarvis_media_processor.alignment.evidence import downweight_pairs, merge_evidence
+    from jarvis_media_processor.alignment.unrelated import complementary_donor_intervals
 
     notes: list[str] = []
+    if donor_exclude and donor_duration is not None and len(visual_pairs) >= min_visual_pairs:
+        exclude_intervals = [
+            TimelineInterval(start=a, end=b, timeline="donor", reason="excluded")
+            for a, b in donor_exclude
+            if b > a
+        ]
+        keep = complementary_donor_intervals(donor_duration, exclude_intervals)
+        chunked = estimate_alignment_per_donor_chunk(
+            visual_pairs,
+            keep,
+            base_duration=base_duration,
+            donor_duration=donor_duration,
+            inlier_tolerance=visual_inlier_tolerance,
+            min_inlier_ratio=visual_min_inlier_ratio,
+            min_chunk_pairs=max(4, min_visual_pairs // 2),
+            speed_min=speed_min,
+            speed_max=speed_max,
+            speed_tolerance=speed_tolerance,
+        )
+        fitted = int(chunked.evidence.get("fitted_chunks", 0)) if chunked else 0
+        keeps = int(chunked.evidence.get("donor_chunks", 0)) if chunked else 0
+        if (
+            chunked is not None
+            and chunked.segments
+            and chunked.confidence >= 0.5
+            and fitted >= 1
+            and (
+                # All keep-ranges fitted (global or piecewise dual-offset).
+                fitted >= keeps
+                # Or at least two independent chunk models (mid-roll ad case).
+                or (
+                    chunked.strategy == SyncStrategyLevel.PIECEWISE
+                    and fitted >= 2
+                )
+            )
+        ):
+            chunked.notes = [
+                "Visual-first: per-chunk fit outside unrelated donor spans.",
+                *chunked.notes,
+            ]
+            evidence = dict(chunked.evidence)
+            evidence["visual_pairs"] = len(visual_pairs)
+            evidence["audio_pairs"] = len(audio_pairs)
+            evidence["fusion"] = "visual_chunked_exclusions"
+            chunked.evidence = evidence
+            return chunked
+        notes.append(
+            "Visual-first: per-chunk fit weak; trying whole-timeline visual model."
+        )
+
     if len(visual_pairs) >= min_visual_pairs:
         visual_doc = estimate_alignment(
             visual_pairs,

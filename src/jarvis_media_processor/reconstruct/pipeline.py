@@ -13,7 +13,10 @@ from jarvis_media_processor.config import Settings, get_settings
 from jarvis_media_processor.reconstruct.extract import extract_donor_wav
 from jarvis_media_processor.reconstruct.models import ReconstructionResult
 from jarvis_media_processor.reconstruct.plan import plan_placements
-from jarvis_media_processor.reconstruct.render import render_placements
+from jarvis_media_processor.reconstruct.render import (
+    fill_missing_base_audio,
+    render_placements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,37 @@ def reconstruct_donor_audio(
         placements,
         base_duration=base_duration,
     )
+
+    filled = 0
+    base_path = alignment.base_path
+    min_fill = float(cfg.alignment_missing_base_fill_seconds)
+    if base_path is not None and Path(base_path).is_file() and alignment.missing_base_intervals:
+        base_wav = work / "base_track0.wav"
+        extract_donor_wav(
+            base_path,
+            base_wav,
+            settings=cfg,
+            sample_rate=sample_rate,
+            channels=1 if channels == 1 else channels,
+            audio_stream_index=0,
+        )
+        base_samples, _ = read_pcm16_wav(base_wav, mix_to_mono=(channels == 1))
+        before = canvas.copy()
+        canvas = fill_missing_base_audio(
+            canvas,
+            base_samples,
+            sample_rate,
+            alignment.missing_base_intervals,
+            min_seconds=min_fill,
+            crossfade_seconds=crossfade_seconds,
+        )
+        filled = sum(
+            1
+            for item in alignment.missing_base_intervals
+            if item.timeline == "base" and item.end - item.start >= min_fill - 1e-9
+        )
+        _ = before  # kept for clarity that we replace in-place via return
+
     out_wav = work / "donor_on_base.wav"
     write_pcm16_wav(out_wav, canvas, sample_rate=sample_rate)
     out_channels = int(canvas.shape[0])
@@ -100,7 +134,12 @@ def reconstruct_donor_audio(
         f"placements={len(placements)}",
         f"skipped={len(skipped)}",
         f"base_duration={base_duration:.3f}s",
-        "Missing base regions left as silence (no timeline shift).",
+        (
+            f"Filled {filled} missing-base gap(s) from base track 0 "
+            f"(threshold={min_fill:.1f}s)."
+            if filled
+            else "Missing base regions left as silence when below fill threshold."
+        ),
         "Segment edges use short fades to reduce clicks.",
         "Quality path: PCM WAV extract (default 48 kHz); avoid re-encoding until mux.",
     ]
@@ -138,6 +177,8 @@ def reconstruct_from_wav(
     min_segment_seconds: float = 0.05,
     require_reliable: bool = False,
     crossfade_seconds: float = 0.01,
+    base_wav: Path | str | None = None,
+    missing_base_fill_seconds: float = 3.0,
 ) -> ReconstructionResult:
     """Reconstruct using an already-extracted donor WAV (unit-test friendly)."""
     samples, sample_rate = read_pcm16_wav(Path(donor_wav))
@@ -153,6 +194,20 @@ def reconstruct_from_wav(
         placements,
         base_duration=base_duration,
     )
+    notes = ["reconstruct_from_wav"]
+    if base_wav is not None and alignment.missing_base_intervals:
+        base_samples, _ = read_pcm16_wav(Path(base_wav))
+        canvas = fill_missing_base_audio(
+            canvas,
+            base_samples,
+            sample_rate,
+            alignment.missing_base_intervals,
+            min_seconds=missing_base_fill_seconds,
+            crossfade_seconds=crossfade_seconds,
+        )
+        notes.append(
+            f"filled_missing_base_threshold={missing_base_fill_seconds:.1f}s"
+        )
     out = Path(output_wav)
     out.parent.mkdir(parents=True, exist_ok=True)
     mono = canvas[0] if canvas.ndim == 2 else canvas
@@ -166,5 +221,5 @@ def reconstruct_from_wav(
         strategy=alignment.strategy,
         placements=placements,
         skipped_segments=skipped,
-        notes=["reconstruct_from_wav"],
+        notes=notes,
     )

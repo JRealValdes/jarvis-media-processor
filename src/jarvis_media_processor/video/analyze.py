@@ -8,11 +8,14 @@ from pathlib import Path
 from jarvis_media_processor.config import Settings, get_settings
 from jarvis_media_processor.video.activity import build_activity_envelope
 from jarvis_media_processor.video.extract import extract_sampled_frames
-from jarvis_media_processor.video.match import match_frames
+from jarvis_media_processor.video.match import match_frames, match_frames_two_phase
 from jarvis_media_processor.video.models import VisualMatchReport
 from jarvis_media_processor.video.shots import shot_boundary_times
 
 logger = logging.getLogger(__name__)
+
+# Prefer two-phase matches; fall back to brute pHash if too sparse.
+_MIN_TWO_PHASE_MATCHES = 8
 
 
 def match_media_visuals(
@@ -22,19 +25,14 @@ def match_media_visuals(
     *,
     settings: Settings | None = None,
 ) -> VisualMatchReport:
-    """Sample frames from base and donor and return ranked visual matches.
+    """Sample frames and match in two phases: activity derivatives, then frames.
 
-    Detects abrupt pHash jumps (shot cuts) and boosts matches that involve
-    those frames so they act as stronger temporal anchors for alignment.
+    1. Build visual activity envelopes (consecutive-frame change curves).
+    2. Propose base↔donor times from a coarse activity sync + peaks/shots.
+    3. Confirm each proposal with actual frame pHash (reject lookalike curves).
+    4. If confirmed matches are too sparse, fall back to brute-force pHash.
 
-    Args:
-        base_path: Base media path (timeline authority).
-        donor_path: Donor media path.
-        workspace: Directory for extracted frames and report JSON.
-        settings: Optional settings override.
-
-    Returns:
-        ``VisualMatchReport`` (also written under ``workspace``).
+    Detected shot cuts boost confidence so they act as stronger temporal anchors.
     """
     cfg = settings or get_settings()
     base = Path(base_path)
@@ -60,16 +58,54 @@ def match_media_visuals(
     donor_shots = shot_boundary_times(
         donor_frames, min_distance=cfg.video_shot_min_distance
     )
-    matches = match_frames(
+    base_activity = build_activity_envelope(base_frames)
+    donor_activity = build_activity_envelope(donor_frames)
+
+    # Lazy import avoids video ↔ alignment circular imports at module load.
+    from jarvis_media_processor.alignment.activity_sync import (
+        estimate_speed_offset_activity,
+    )
+
+    coarse = estimate_speed_offset_activity(
+        base_activity,
+        donor_activity,
+        speed_min=cfg.alignment_speed_min,
+        speed_max=cfg.alignment_speed_max,
+    )
+    matches = match_frames_two_phase(
         base_frames,
         donor_frames,
+        base_activity,
+        donor_activity,
+        speed=coarse.speed,
+        offset_seconds=coarse.offset_seconds,
         max_distance=cfg.video_match_max_distance,
         max_matches_per_base=cfg.video_match_max_per_base,
+        half_window=cfg.alignment_unrelated_window_seconds,
+        min_activity_score=cfg.alignment_unrelated_min_score,
+        donor_search_seconds=min(120.0, cfg.alignment_unrelated_max_surplus_seconds),
         base_shot_times=base_shots,
         donor_shot_times=donor_shots,
     )
-    base_activity = build_activity_envelope(base_frames)
-    donor_activity = build_activity_envelope(donor_frames)
+    match_method = "activity_then_frames"
+    two_phase_count = len(matches)
+    if two_phase_count < _MIN_TWO_PHASE_MATCHES:
+        brute = match_frames(
+            base_frames,
+            donor_frames,
+            max_distance=cfg.video_match_max_distance,
+            max_matches_per_base=cfg.video_match_max_per_base,
+            base_shot_times=base_shots,
+            donor_shot_times=donor_shots,
+        )
+        if len(brute) > two_phase_count:
+            logger.info(
+                "Two-phase visual match sparse (%d); using brute-force pHash (%d).",
+                two_phase_count,
+                len(brute),
+            )
+            matches = brute
+            match_method = "phash_bruteforce_fallback"
 
     report = VisualMatchReport(
         base_path=base.resolve(),
@@ -94,15 +130,20 @@ def match_media_visuals(
             "base_shot_count": len(base_shots),
             "donor_shot_count": len(donor_shots),
             "activity_sample_period": base_activity.sample_period,
+            "match_method": match_method,
+            "activity_sync_speed": coarse.speed,
+            "activity_sync_offset": coarse.offset_seconds,
+            "activity_sync_score": coarse.score,
         },
     )
     out = work / "visual_match_report.json"
     out.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
     logger.info(
-        "Visual match %s vs %s: %d matches -> %s",
+        "Visual match %s vs %s: %d matches (%s) -> %s",
         base.name,
         donor.name,
         len(matches),
+        match_method,
         out,
     )
     return report

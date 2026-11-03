@@ -99,3 +99,69 @@ def test_match_frames_finds_offset_pair(tmp_path: Path) -> None:
     assert best.base_time == 1.0
     assert best.donor_time == 3.0
     assert best.confidence == distance_to_confidence(best.distance, max_distance=12)
+
+
+def test_frames_match_at_confirms_same_scene(tmp_path: Path) -> None:
+    from jarvis_media_processor.video.confirm import frames_match_at, make_frame_confirmer
+
+    img = _pattern(0)
+    path = tmp_path / "f.png"
+    img.save(path)
+    ph = str(compute_phash(img))
+    base = [SampledFrame(time_seconds=10.0, path=path, phash=ph, role="base")]
+    donor = [SampledFrame(time_seconds=12.0, path=path, phash=ph, role="donor")]
+    assert frames_match_at(base, donor, base_time=10.0, donor_time=12.0, max_distance=12)
+    confirm = make_frame_confirmer(base, donor, max_distance=12)
+    assert confirm(10.0, 12.0)
+    other = str(compute_phash(_solid((10, 180, 10))))
+    donor_bad = [SampledFrame(time_seconds=12.0, path=path, phash=other, role="donor")]
+    assert not frames_match_at(
+        base, donor_bad, base_time=10.0, donor_time=12.0, max_distance=8
+    )
+
+
+def test_two_phase_match_rejects_curve_lookalike_without_frame_match(
+    tmp_path: Path,
+) -> None:
+    """Activity curves can align while pictures differ — frames must confirm."""
+    import numpy as np
+
+    from jarvis_media_processor.video.activity import ActivityEnvelope
+    from jarvis_media_processor.video.match import match_frames_two_phase
+
+    # Identical activity pulses, but different frame content at those times.
+    times = np.arange(0.0, 40.0, 1.0)
+    values = np.zeros_like(times)
+    values[5] = values[15] = values[25] = 1.0
+    env = ActivityEnvelope(times=times, values=values, sample_period=1.0)
+
+    same = tmp_path / "a.png"
+    other = tmp_path / "b.png"
+    _pattern(0).save(same)
+    _solid((10, 180, 10)).save(other)
+    same_h = str(compute_phash(_pattern(0)))
+    other_h = str(compute_phash(_solid((10, 180, 10))))
+
+    base_frames = [
+        SampledFrame(time_seconds=float(t), path=same, phash=same_h, role="base")
+        for t in (5.0, 15.0, 25.0)
+    ]
+    # Donor activity matches, but frames are a different scene.
+    donor_frames = [
+        SampledFrame(time_seconds=float(t), path=other, phash=other_h, role="donor")
+        for t in (5.0, 15.0, 25.0)
+    ]
+    matches = match_frames_two_phase(
+        base_frames,
+        donor_frames,
+        env,
+        env,
+        speed=1.0,
+        offset_seconds=0.0,
+        max_distance=8,
+        half_window=4.0,
+        min_activity_score=0.2,
+        donor_search_seconds=4.0,
+        donor_search_step=1.0,
+    )
+    assert matches == []
