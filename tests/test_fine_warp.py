@@ -8,9 +8,10 @@ from jarvis_media_processor.reconstruct.fine_warp import (
     apply_lag_curve,
     comparable_onset_envelope,
     estimate_local_lag,
-    gate_lag_with_confidence,
+    interpolate_from_pillars,
     lag_curve_from_dense,
     plan_and_apply_fine_warp,
+    select_lag_pillars,
 )
 
 
@@ -88,15 +89,18 @@ def test_apply_lag_curve_corrects_late_recon() -> None:
     assert abs(peak_t - truth_t) < 0.04
 
 
-def test_confidence_gate_blocks_smooth_bleed() -> None:
-    """Low-confidence steps must not keep a strong neighbor lag after smooth."""
-    smoothed = np.asarray([0.33, 0.33, 0.23, 0.33, 0.33], dtype=np.float64)
-    conf = np.asarray([0.7, 0.7, 0.0, 0.7, 0.7], dtype=np.float64)
-    gated = gate_lag_with_confidence(
-        smoothed, conf, global_lag=-0.08, confidence_tau=0.08
+def test_pillars_reject_weak_score_and_interp_preserves_sign() -> None:
+    lags = np.asarray([0.45, -0.7, 0.40, 0.42], dtype=np.float64)
+    conf = np.asarray([0.5, 0.4, 0.5, 0.5], dtype=np.float64)
+    scores = np.asarray([0.78, 0.22, 0.75, 0.76], dtype=np.float64)
+    pillars = select_lag_pillars(
+        conf, scores, confidence_tau=0.08, min_pillar_score=0.4
     )
-    assert abs(gated[2] - (-0.08)) < 1e-9
-    assert gated[0] > 0.2
+    assert bool(pillars[0]) and not bool(pillars[1]) and bool(pillars[2])
+    times = np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float64)
+    field = interpolate_from_pillars(times, lags, pillars, fallback_lag=0.0)
+    # Weak middle inherits neighbors (~+0.45), not the spurious -0.7 or a negative prior.
+    assert field[1] > 0.3
 
 
 def test_dense_curve_has_no_zero_gaps() -> None:

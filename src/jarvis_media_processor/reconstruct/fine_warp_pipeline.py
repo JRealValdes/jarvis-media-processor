@@ -111,6 +111,7 @@ def fine_warp_reconstructed_audio(
         prior_weight=cfg.fine_warp_prior_weight,
         smooth_seconds=cfg.fine_warp_smooth_seconds,
         confidence_tau=cfg.fine_warp_confidence_tau,
+        min_pillar_score=cfg.fine_warp_min_pillar_score,
         band_low_hz=cfg.fine_warp_band_low_hz,
         band_high_hz=cfg.fine_warp_band_high_hz,
     )

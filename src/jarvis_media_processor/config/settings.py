@@ -204,18 +204,22 @@ class Settings(BaseSettings):
         description="Wider window used to score big-picture improvement vs lag=0.",
     )
     fine_warp_prior_weight: float = Field(
-        default=0.15,
-        description="Blend weight pulling weak local lags toward the global prior.",
+        default=0.02,
+        description="Light blend of pillar lags toward the pillar-median lag.",
     )
     fine_warp_smooth_seconds: float = Field(
-        default=30.0,
-        description="Temporal smoothing radius for the dense lag field.",
+        default=20.0,
+        description="Temporal smoothing radius among high-confidence lag pillars.",
     )
     fine_warp_confidence_tau: float = Field(
         default=0.08,
+        description="Minimum confidence for a step to count as a lag pillar.",
+    )
+    fine_warp_min_pillar_score: float = Field(
+        default=0.4,
         description=(
-            "Confidence floor for post-smooth gating; low-confidence steps fall "
-            "back to the global lag prior (prevents smooth bleed)."
+            "Minimum absolute onset correlation to be a pillar "
+            "(rejects weak cross-language false peaks)."
         ),
     )
     fine_warp_band_low_hz: float = Field(

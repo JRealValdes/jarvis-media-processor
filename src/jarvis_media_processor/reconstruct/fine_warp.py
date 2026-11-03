@@ -243,23 +243,37 @@ def _weighted_median(values: NDArray[np.floating], weights: NDArray[np.floating]
     return float(vals[idx])
 
 
-def gate_lag_with_confidence(
-    smoothed_lags: NDArray[np.floating],
+def select_lag_pillars(
     confidence: NDArray[np.floating],
+    scores: NDArray[np.floating],
     *,
-    global_lag: float,
     confidence_tau: float = 0.08,
-) -> NDArray[np.float64]:
-    """Pull low-confidence steps back to the global prior after smoothing.
+    min_pillar_score: float = 0.4,
+) -> NDArray[np.bool_]:
+    """Mark trustworthy steps (pillars) for interpolation.
 
-    Neighbor-weighted smooth alone re-injects strong lags into weak windows
-    (smooth bleed). Own-confidence gating prevents that over-correction.
+    Weak absolute correlation must not become a pillar even if a spurious lag
+    beats lag=0 by a thin margin (common in cross-language dialogue).
     """
-    sm = np.asarray(smoothed_lags, dtype=np.float64)
     conf = np.asarray(confidence, dtype=np.float64)
-    tau = max(float(confidence_tau), 1e-9)
-    trust = conf / (conf + tau)
-    return trust * sm + (1.0 - trust) * float(global_lag)
+    sc = np.asarray(scores, dtype=np.float64)
+    return (conf >= float(confidence_tau)) & (sc >= float(min_pillar_score))
+
+
+def interpolate_from_pillars(
+    times: NDArray[np.floating],
+    lags: NDArray[np.floating],
+    pillars: NDArray[np.bool_],
+    *,
+    fallback_lag: float = 0.0,
+) -> NDArray[np.float64]:
+    """Dense field = interpolate pillar lags; identity fallback outside pillars."""
+    t = np.asarray(times, dtype=np.float64)
+    lag = np.asarray(lags, dtype=np.float64)
+    mask = np.asarray(pillars, dtype=bool)
+    if not np.any(mask):
+        return np.full(t.shape, float(fallback_lag), dtype=np.float64)
+    return np.interp(t, t[mask], lag[mask]).astype(np.float64)
 
 
 def estimate_dense_lag_field(
@@ -272,11 +286,16 @@ def estimate_dense_lag_field(
     step_seconds: float = 2.0,
     max_lag_seconds: float = 1.0,
     context_window_seconds: float = 10.0,
-    prior_weight: float = 0.15,
-    smooth_seconds: float = 30.0,
+    prior_weight: float = 0.02,
+    smooth_seconds: float = 20.0,
     confidence_tau: float = 0.08,
+    min_pillar_score: float = 0.4,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], list[LagKnot], float, list[str]]:
-    """Dense lag grid blended with a global prior and temporally smoothed.
+    """Dense lag grid from high-confidence pillars, interpolated elsewhere.
+
+    Low-confidence steps do **not** fall back to a film-wide prior (that pulled
+    +0.45s regions toward −0.08s and made late audio later). They inherit the
+    surrounding pillar lag via interpolation, or 0 outside all pillars.
 
     Returns ``(times, lags, knots, global_lag, notes)``.
     """
@@ -328,48 +347,59 @@ def estimate_dense_lag_field(
         # Distrust saturations at the search edge (often wrong cross-lang peaks).
         if abs(lag) >= max_lag_seconds - edge_eps:
             c *= 0.2
+        # Weak absolute lock: do not let thin margins create pillars.
+        if score < float(min_pillar_score):
+            c *= 0.25
         conf[i] = c
 
-    # Global prior from confident windows only.
-    confident = conf >= max(1e-6, float(np.percentile(conf, 70)) if conf.size else 1.0)
-    if np.any(confident) and float(np.sum(conf[confident])) > 0:
-        global_lag = _weighted_median(raw_lags[confident], conf[confident])
-    elif conf.size:
-        global_lag = _weighted_median(raw_lags, np.maximum(conf, 1e-6))
+    pillars = select_lag_pillars(
+        conf,
+        scores,
+        confidence_tau=confidence_tau,
+        min_pillar_score=min_pillar_score,
+    )
+    n_pillars = int(np.count_nonzero(pillars))
+    if n_pillars:
+        global_lag = float(np.median(raw_lags[pillars]))
     else:
         global_lag = 0.0
-    notes.append(f"Global lag prior={global_lag:+.3f}s from dense onset field.")
+    notes.append(
+        f"Lag pillars={n_pillars}/{centers.size}; median pillar lag={global_lag:+.3f}s."
+    )
 
-    # Pre-blend locals toward prior, then confidence-weighted temporal smooth.
-    pre = np.empty_like(raw_lags)
-    for i in range(raw_lags.size):
+    # Light pull of pillar lags toward median (stability), then short smooth on pillars.
+    pillar_lags = raw_lags.copy()
+    for i in np.where(pillars)[0]:
         c = float(conf[i])
-        pre[i] = (c * raw_lags[i] + prior_weight * global_lag) / (c + prior_weight)
+        pillar_lags[i] = (c * raw_lags[i] + prior_weight * global_lag) / (
+            c + prior_weight
+        )
 
     radius = max(0, int(round(smooth_seconds / step_seconds)))
-    smoothed = pre.copy()
-    if radius > 0 and pre.size >= 3:
-        for i in range(pre.size):
+    if radius > 0 and n_pillars >= 3:
+        smoothed = pillar_lags.copy()
+        pillar_idx = np.where(pillars)[0]
+        for i in pillar_idx:
             lo = max(0, i - radius)
-            hi = min(pre.size, i + radius + 1)
-            w = conf[lo:hi]
-            v = pre[lo:hi]
-            if float(np.sum(w)) > 1e-9:
-                smoothed[i] = float(np.average(v, weights=np.maximum(w, 1e-6)))
-            else:
-                smoothed[i] = float(global_lag)
+            hi = min(centers.size, i + radius + 1)
+            local = np.zeros(centers.size, dtype=bool)
+            local[lo:hi] = pillars[lo:hi]
+            if not np.any(local):
+                continue
+            w = conf[local]
+            v = pillar_lags[local]
+            smoothed[i] = float(np.average(v, weights=np.maximum(w, 1e-6)))
+        pillar_lags = smoothed
 
-    # Critical: neighbor smooth can still paint strong lag onto conf≈0 windows.
-    # Re-gate with each step's own confidence so weak regions fall back to prior.
-    blended = gate_lag_with_confidence(
-        smoothed,
-        conf,
-        global_lag=global_lag,
-        confidence_tau=confidence_tau,
+    blended = interpolate_from_pillars(
+        centers,
+        pillar_lags,
+        pillars,
+        fallback_lag=0.0,
     )
     notes.append(
-        f"Confidence gate tau={confidence_tau:.3f} "
-        f"(low-conf steps → global prior after smooth)."
+        "Low-confidence steps interpolate adjacent pillars "
+        "(not a film-wide prior; avoids wrong-direction fallback)."
     )
 
     knots = [
@@ -454,9 +484,10 @@ def plan_lag_field(
     window_seconds: float = 4.0,
     step_seconds: float = 2.0,
     context_window_seconds: float = 10.0,
-    prior_weight: float = 0.15,
-    smooth_seconds: float = 30.0,
+    prior_weight: float = 0.02,
+    smooth_seconds: float = 20.0,
     confidence_tau: float = 0.08,
+    min_pillar_score: float = 0.4,
     hop_seconds: float = 0.01,
     frame_seconds: float = 0.04,
     band_low_hz: float = 300.0,
@@ -501,6 +532,7 @@ def plan_lag_field(
         prior_weight=prior_weight,
         smooth_seconds=smooth_seconds,
         confidence_tau=confidence_tau,
+        min_pillar_score=min_pillar_score,
     )
     plan = FineWarpPlan(
         knots=knots,
@@ -525,9 +557,10 @@ def plan_and_apply_fine_warp(
     window_seconds: float = 4.0,
     step_seconds: float = 2.0,
     context_window_seconds: float = 10.0,
-    prior_weight: float = 0.15,
-    smooth_seconds: float = 30.0,
+    prior_weight: float = 0.02,
+    smooth_seconds: float = 20.0,
     confidence_tau: float = 0.08,
+    min_pillar_score: float = 0.4,
     band_low_hz: float = 300.0,
     band_high_hz: float = 6000.0,
 ) -> tuple[NDArray[np.floating], FineWarpPlan]:
@@ -554,6 +587,7 @@ def plan_and_apply_fine_warp(
         prior_weight=prior_weight,
         smooth_seconds=smooth_seconds,
         confidence_tau=confidence_tau,
+        min_pillar_score=min_pillar_score,
         band_low_hz=band_low_hz,
         band_high_hz=band_high_hz,
     )
