@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from jarvis_media_processor.config import Settings, get_settings
-from jarvis_media_processor.video.activity import build_activity_envelope
+from jarvis_media_processor.video.activity import build_fused_activity_envelope
 from jarvis_media_processor.video.extract import extract_sampled_frames
 from jarvis_media_processor.video.match import match_frames, match_frames_two_phase
 from jarvis_media_processor.video.models import VisualMatchReport
@@ -27,7 +27,7 @@ def match_media_visuals(
 ) -> VisualMatchReport:
     """Sample frames and match in two phases: activity derivatives, then frames.
 
-    1. Build visual activity envelopes (consecutive-frame change curves).
+    1. Build fused activity envelopes (pHash-diff floor + structural edge change).
     2. Propose base↔donor times from a coarse activity sync + peaks/shots.
     3. Confirm each proposal with actual frame pHash (reject lookalike curves).
     4. If confirmed matches are too sparse, fall back to brute-force pHash.
@@ -58,8 +58,9 @@ def match_media_visuals(
     donor_shots = shot_boundary_times(
         donor_frames, min_distance=cfg.video_shot_min_distance
     )
-    base_activity = build_activity_envelope(base_frames)
-    donor_activity = build_activity_envelope(donor_frames)
+    # Fuse encode-local pHash cuts with encode-robust structural change.
+    base_activity = build_fused_activity_envelope(base_frames)
+    donor_activity = build_fused_activity_envelope(donor_frames)
 
     # Lazy import avoids video ↔ alignment circular imports at module load.
     from jarvis_media_processor.alignment.activity_sync import (
@@ -130,6 +131,8 @@ def match_media_visuals(
             "base_shot_count": len(base_shots),
             "donor_shot_count": len(donor_shots),
             "activity_sample_period": base_activity.sample_period,
+            "activity_method": "fused_max_phash_structural",
+            "activity_structural_weight": 0.5,
             "match_method": match_method,
             "activity_sync_speed": coarse.speed,
             "activity_sync_offset": coarse.offset_seconds,
