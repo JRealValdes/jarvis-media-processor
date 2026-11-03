@@ -1,8 +1,9 @@
-"""Piecewise fine audio warp: reconstructed donor vs base track 0.
+"""Windowed fine lag field: reconstructed donor vs base track 0.
 
-After coarse reconstruct, residual lag (tens of ms) can remain. This pass
-matches strong energy onsets and applies only short, mild local warps.
-Uncertain matches are skipped — never stretched across long spans.
+Estimates a slowly varying lag ``L(t)`` from energy-envelope correlation in
+sliding windows. A candidate lag is kept only when it beats lag=0 locally
+*and* improves correlation across neighboring windows. Uncertain regions stay
+at identity — no landmark snapping, no multi-minute rubber-banding.
 """
 
 from __future__ import annotations
@@ -12,45 +13,61 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from jarvis_media_processor.audio.landmarks import detect_energy_landmarks, rms_envelope
+from jarvis_media_processor.audio.landmarks import rms_envelope
 from jarvis_media_processor.video.activity import normalize_activity
 
-# Block size when remapping long PCM (samples per channel).
 _WARP_BLOCK = 1_000_000
 
 
 @dataclass(frozen=True)
-class AnchorMatch:
-    """A base onset paired with a nearby reconstructed onset."""
+class LagKnot:
+    """Trusted lag sample on the shared base timeline."""
 
-    base_time: float
-    recon_time: float
+    time_seconds: float
     lag_seconds: float
     score: float
-
-
-@dataclass(frozen=True)
-class FineWarpSegment:
-    """Map reconstructed ``[recon_start, recon_end]`` onto ``[base_start, base_end]``."""
-
-    base_start: float
-    base_end: float
-    recon_start: float
-    recon_end: float
-    speed: float
-    score: float
+    improvement: float
 
 
 @dataclass
 class FineWarpPlan:
-    """Planned fine warps plus diagnostics."""
+    """Lag-field plan plus diagnostics."""
 
-    anchors: list[AnchorMatch] = field(default_factory=list)
-    segments: list[FineWarpSegment] = field(default_factory=list)
+    knots: list[LagKnot] = field(default_factory=list)
     skipped_notes: list[str] = field(default_factory=list)
 
 
-def _local_lag(
+def _window_corr(
+    base_env: NDArray[np.floating],
+    recon_env: NDArray[np.floating],
+    *,
+    hop: float,
+    center_seconds: float,
+    lag_seconds: float,
+    window_seconds: float,
+) -> float:
+    """Pearson-like correlation of envelopes in a window at a fixed lag."""
+    if hop <= 0 or window_seconds <= 0:
+        return 0.0
+    half = 0.5 * window_seconds
+    b0 = int(round((center_seconds - half) / hop))
+    b1 = int(round((center_seconds + half) / hop)) + 1
+    r0 = int(round((center_seconds - half + lag_seconds) / hop))
+    r1 = r0 + (b1 - b0)
+    if b0 < 0 or b1 > int(base_env.size) or r0 < 0 or r1 > int(recon_env.size):
+        return 0.0
+    if b1 - b0 < 4:
+        return 0.0
+    template = normalize_activity(np.asarray(base_env[b0:b1], dtype=np.float64))
+    cand = normalize_activity(np.asarray(recon_env[r0:r1], dtype=np.float64))
+    if template.size != cand.size or float(np.max(np.abs(template))) < 1e-12:
+        return 0.0
+    if float(np.max(np.abs(cand))) < 1e-12:
+        return 0.0
+    return float(np.mean(template * cand))
+
+
+def estimate_local_lag(
     base_env: NDArray[np.floating],
     recon_env: NDArray[np.floating],
     *,
@@ -59,291 +76,280 @@ def _local_lag(
     window_seconds: float,
     max_lag_seconds: float,
 ) -> tuple[float, float, float]:
-    """Return ``(best_lag, best_score, zero_lag_score)``.
-
-    ``lag`` is recon_time − base_time at the best match (positive ⇒ recon late).
-    """
-    if hop <= 0 or base_env.size < 4 or recon_env.size < 4:
+    """Return ``(best_lag, best_score, zero_lag_score)`` for one analysis window."""
+    if hop <= 0:
         return 0.0, 0.0, 0.0
-    half_w = max(1, int(round((window_seconds * 0.5) / hop)))
-    center_i = int(round(center_seconds / hop))
-    b0 = max(0, center_i - half_w)
-    b1 = min(int(base_env.size), center_i + half_w + 1)
-    if b1 - b0 < 4:
-        return 0.0, 0.0, 0.0
-    template = normalize_activity(np.asarray(base_env[b0:b1], dtype=np.float64))
-    if float(np.max(np.abs(template))) < 1e-12:
-        return 0.0, 0.0, 0.0
-
     max_lag_hops = max(1, int(round(max_lag_seconds / hop)))
     best_lag = 0.0
     best_score = -1.0
-    zero_score = -1.0
+    zero_score = _window_corr(
+        base_env,
+        recon_env,
+        hop=hop,
+        center_seconds=center_seconds,
+        lag_seconds=0.0,
+        window_seconds=window_seconds,
+    )
     for lag_h in range(-max_lag_hops, max_lag_hops + 1):
-        r_center = center_i + lag_h
-        r0 = r_center - half_w
-        r1 = r_center + half_w + 1
-        if r0 < 0 or r1 > int(recon_env.size):
-            continue
-        cand = normalize_activity(np.asarray(recon_env[r0:r1], dtype=np.float64))
-        if cand.size != template.size:
-            continue
-        # Both sides are z-scored → mean product ≈ Pearson correlation.
-        score = float(np.mean(template * cand))
-        if lag_h == 0:
-            zero_score = score
-        if score > best_score:
-            best_score = score
-            best_lag = lag_h * hop
-    if best_score < 0:
-        return 0.0, 0.0, 0.0
-    if zero_score < 0:
-        # Zero lag was out of bounds (shouldn't happen mid-timeline).
-        zero_score = 0.0
-    return best_lag, best_score, zero_score
-
-
-def match_onset_anchors(
-    base_samples: NDArray[np.floating],
-    recon_samples: NDArray[np.floating],
-    sample_rate: int,
-    *,
-    max_lag_seconds: float = 0.12,
-    window_seconds: float = 0.45,
-    min_score: float = 0.55,
-    min_score_margin: float = 0.08,
-    hop_seconds: float = 0.01,
-    frame_seconds: float = 0.04,
-    min_distance_seconds: float = 0.75,
-    prominence: float = 0.28,
-    max_landmarks: int = 300,
-) -> list[AnchorMatch]:
-    """Pair strong base energy landmarks with local lags on the reconstructed track.
-
-    Rejects weak correlations, search-edge saturations, and peaks that do not beat
-    lag=0 by ``min_score_margin`` (avoids picking the wrong nearby dialogue line).
-    """
-    base = np.asarray(base_samples, dtype=np.float64).reshape(-1)
-    recon = np.asarray(recon_samples, dtype=np.float64).reshape(-1)
-    landmarks, _, _ = detect_energy_landmarks(
-        base,
-        sample_rate,
-        hop_seconds=hop_seconds,
-        frame_seconds=frame_seconds,
-        min_distance_seconds=min_distance_seconds,
-        prominence=prominence,
-        max_landmarks=max_landmarks,
-    )
-    base_env, hop = rms_envelope(
-        base, sample_rate, hop_seconds=hop_seconds, frame_seconds=frame_seconds
-    )
-    recon_env, _ = rms_envelope(
-        recon, sample_rate, hop_seconds=hop_seconds, frame_seconds=frame_seconds
-    )
-    hop = float(hop) if hop > 0 else hop_seconds
-    # Treat lags within one hop of the search limit as saturated / untrusted.
-    edge_eps = max(hop * 0.75, 1e-3)
-
-    matches: list[AnchorMatch] = []
-    for lm in landmarks:
-        lag, score, zero_score = _local_lag(
+        lag = lag_h * hop
+        score = _window_corr(
             base_env,
             recon_env,
             hop=hop,
-            center_seconds=lm.time_seconds,
+            center_seconds=center_seconds,
+            lag_seconds=lag,
+            window_seconds=window_seconds,
+        )
+        if score > best_score:
+            best_score = score
+            best_lag = lag
+    if best_score < 0:
+        return 0.0, 0.0, float(zero_score)
+    return float(best_lag), float(best_score), float(zero_score)
+
+
+def neighborhood_improvement(
+    base_env: NDArray[np.floating],
+    recon_env: NDArray[np.floating],
+    *,
+    hop: float,
+    center_seconds: float,
+    proposed_lag: float,
+    window_seconds: float,
+    neighbor_radius_seconds: float,
+    neighbor_step_seconds: float,
+) -> float:
+    """Mean neighbor-window correlation at ``proposed_lag`` minus the same at lag=0."""
+    if neighbor_step_seconds <= 0:
+        neighbor_step_seconds = window_seconds
+    starts = center_seconds - neighbor_radius_seconds
+    ends = center_seconds + neighbor_radius_seconds
+    times = np.arange(starts, ends + 0.5 * neighbor_step_seconds, neighbor_step_seconds)
+    if times.size == 0:
+        times = np.asarray([center_seconds], dtype=np.float64)
+    with_lag: list[float] = []
+    with_zero: list[float] = []
+    for t in times:
+        with_lag.append(
+            _window_corr(
+                base_env,
+                recon_env,
+                hop=hop,
+                center_seconds=float(t),
+                lag_seconds=proposed_lag,
+                window_seconds=window_seconds,
+            )
+        )
+        with_zero.append(
+            _window_corr(
+                base_env,
+                recon_env,
+                hop=hop,
+                center_seconds=float(t),
+                lag_seconds=0.0,
+                window_seconds=window_seconds,
+            )
+        )
+    return float(np.mean(with_lag) - np.mean(with_zero))
+
+
+def estimate_lag_knots(
+    base_env: NDArray[np.floating],
+    recon_env: NDArray[np.floating],
+    *,
+    hop: float,
+    duration_seconds: float,
+    window_seconds: float = 3.0,
+    step_seconds: float = 1.0,
+    max_lag_seconds: float = 0.15,
+    min_score: float = 0.35,
+    min_score_margin: float = 0.05,
+    min_improvement: float = 0.02,
+    neighbor_radius_seconds: float = 4.0,
+    neighbor_step_seconds: float = 1.0,
+) -> tuple[list[LagKnot], list[str]]:
+    """Slide analysis windows; keep lags that improve the local neighborhood."""
+    notes: list[str] = []
+    if hop <= 0 or duration_seconds <= 0 or step_seconds <= 0:
+        return [], ["Invalid envelope timing for lag-field estimation."]
+
+    half = 0.5 * window_seconds
+    # Stay inside envelopes for the analysis window plus max lag pad.
+    pad = half + max_lag_seconds + neighbor_radius_seconds
+    t0 = pad
+    t1 = duration_seconds - pad
+    if t1 <= t0:
+        return [], ["Timeline too short for windowed fine-warp."]
+
+    centers = np.arange(t0, t1 + 0.5 * step_seconds, step_seconds, dtype=np.float64)
+    edge_eps = max(hop * 0.75, 1e-3)
+    knots: list[LagKnot] = []
+    rejected = 0
+    for center in centers:
+        lag, score, zero_score = estimate_local_lag(
+            base_env,
+            recon_env,
+            hop=hop,
+            center_seconds=float(center),
             window_seconds=window_seconds,
             max_lag_seconds=max_lag_seconds,
         )
-        if score < min_score:
+        if score < min_score or (score - zero_score) < min_score_margin:
+            rejected += 1
             continue
-        if score - zero_score < min_score_margin:
+        if abs(lag) <= edge_eps:
             continue
         if abs(lag) > max_lag_seconds - edge_eps:
+            rejected += 1
             continue
-        matches.append(
-            AnchorMatch(
-                base_time=float(lm.time_seconds),
-                recon_time=float(lm.time_seconds + lag),
+        improve = neighborhood_improvement(
+            base_env,
+            recon_env,
+            hop=hop,
+            center_seconds=float(center),
+            proposed_lag=lag,
+            window_seconds=window_seconds,
+            neighbor_radius_seconds=neighbor_radius_seconds,
+            neighbor_step_seconds=neighbor_step_seconds,
+        )
+        if improve < min_improvement:
+            rejected += 1
+            continue
+        knots.append(
+            LagKnot(
+                time_seconds=float(center),
                 lag_seconds=float(lag),
                 score=float(score),
+                improvement=float(improve),
             )
         )
-    matches.sort(key=lambda m: m.base_time)
-    return matches
+    if rejected:
+        notes.append(
+            f"Rejected {rejected} windows (weak score, no margin, edge lag, "
+            "or neighborhood did not improve)."
+        )
+    if not knots:
+        notes.append("No lag knots accepted; leaving reconstruct unchanged.")
+    return knots, notes
 
 
-def filter_coherent_anchors(
-    anchors: list[AnchorMatch],
+def smooth_lag_knots(
+    knots: list[LagKnot],
     *,
-    max_lag_jump_seconds: float = 0.05,
-) -> tuple[list[AnchorMatch], list[str]]:
-    """Drop interior lag spikes that disagree with agreeing neighbors.
+    max_lag_jump_seconds: float = 0.04,
+    median_radius: int = 1,
+) -> tuple[list[LagKnot], list[str]]:
+    """Median-filter accepted lags and drop residual jumps vs neighbors."""
+    if len(knots) < 2:
+        return list(knots), []
+    ordered = sorted(knots, key=lambda k: k.time_seconds)
+    lags = np.asarray([k.lag_seconds for k in ordered], dtype=np.float64)
+    if median_radius > 0 and lags.size >= 3:
+        smoothed = lags.copy()
+        for i in range(lags.size):
+            lo = max(0, i - median_radius)
+            hi = min(lags.size, i + median_radius + 1)
+            smoothed[i] = float(np.median(lags[lo:hi]))
+        lags = smoothed
 
-    Endpoints are kept; pairwise ``max_lag_jump_seconds`` still gates spans.
-    """
-    if len(anchors) < 3:
-        return list(anchors), []
-    kept: list[AnchorMatch] = []
     notes: list[str] = []
-    for i, anchor in enumerate(anchors):
-        if i == 0 or i + 1 == len(anchors):
-            kept.append(anchor)
-            continue
-        left = anchors[i - 1].lag_seconds
-        right = anchors[i + 1].lag_seconds
-        neighbors_agree = abs(left - right) <= max_lag_jump_seconds
-        spike = (
-            abs(anchor.lag_seconds - left) > max_lag_jump_seconds
-            and abs(anchor.lag_seconds - right) > max_lag_jump_seconds
+    kept: list[LagKnot] = [
+        LagKnot(
+            time_seconds=ordered[0].time_seconds,
+            lag_seconds=float(lags[0]),
+            score=ordered[0].score,
+            improvement=ordered[0].improvement,
         )
-        if neighbors_agree and spike:
+    ]
+    for i in range(1, len(ordered)):
+        prev = kept[-1]
+        lag = float(lags[i])
+        if abs(lag - prev.lag_seconds) > max_lag_jump_seconds:
             notes.append(
-                f"Drop incoherent anchor at {anchor.base_time:.2f}s "
-                f"(lag={anchor.lag_seconds:+.3f}s vs neighbors "
-                f"{left:+.3f}/{right:+.3f}s)."
+                f"Drop lag jump at {ordered[i].time_seconds:.1f}s "
+                f"({prev.lag_seconds:+.3f} → {lag:+.3f})."
             )
             continue
-        kept.append(anchor)
+        kept.append(
+            LagKnot(
+                time_seconds=ordered[i].time_seconds,
+                lag_seconds=lag,
+                score=ordered[i].score,
+                improvement=ordered[i].improvement,
+            )
+        )
     return kept, notes
 
 
-def plan_fine_warps(
-    anchors: list[AnchorMatch],
+def lag_curve_from_knots(
+    knots: list[LagKnot],
     *,
-    min_speed: float = 0.97,
-    max_speed: float = 1.03,
-    min_span_seconds: float = 0.4,
-    max_span_seconds: float = 4.0,
-    max_lag_seconds: float = 0.12,
-    max_lag_jump_seconds: float = 0.05,
-) -> FineWarpPlan:
-    """Turn nearby coherent anchors into short mild stretch/compress segments.
+    duration_seconds: float,
+    sample_rate: int,
+    interp_gap_seconds: float = 3.0,
+) -> NDArray[np.float64]:
+    """Per-sample lag curve; identity (0) outside trusted interpolations."""
+    n = max(1, int(round(duration_seconds * sample_rate)))
+    curve = np.zeros(n, dtype=np.float64)
+    if len(knots) == 0:
+        return curve
+    ordered = sorted(knots, key=lambda k: k.time_seconds)
+    times = np.asarray([k.time_seconds for k in ordered], dtype=np.float64)
+    lags = np.asarray([k.lag_seconds for k in ordered], dtype=np.float64)
+    sample_t = np.arange(n, dtype=np.float64) / float(sample_rate)
 
-    Spans longer than ``max_span_seconds`` are never warped (avoids multi-minute
-    rubber-banding from a pair of dubious endpoints).
-    """
-    coherent, drop_notes = filter_coherent_anchors(
-        anchors, max_lag_jump_seconds=max_lag_jump_seconds
-    )
-    plan = FineWarpPlan(anchors=list(coherent), skipped_notes=list(drop_notes))
-    if len(coherent) < 2:
-        if coherent:
-            plan.skipped_notes.append(
-                "Fewer than 2 coherent onset anchors; no piecewise fine-warp segments."
-            )
-        else:
-            plan.skipped_notes.append("No coherent onset anchors for fine-warp.")
-        return plan
-
-    for left, right in zip(coherent, coherent[1:], strict=False):
-        base_span = right.base_time - left.base_time
-        recon_span = right.recon_time - left.recon_time
-        if base_span < min_span_seconds:
-            plan.skipped_notes.append(
-                f"Skip short span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(<{min_span_seconds:.2f}s)."
-            )
-            continue
-        if base_span > max_span_seconds:
-            plan.skipped_notes.append(
-                f"Skip long span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(>{max_span_seconds:.2f}s; refuse multi-minute rubber-band)."
-            )
-            continue
-        if recon_span <= 1e-6:
-            plan.skipped_notes.append(
-                f"Skip non-positive recon span at base {left.base_time:.2f}–"
-                f"{right.base_time:.2f}s."
-            )
-            continue
-        if abs(left.lag_seconds) > max_lag_seconds + 1e-9:
-            plan.skipped_notes.append(
-                f"Skip span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(left lag {left.lag_seconds:+.3f}s exceeds ±{max_lag_seconds:.3f}s)."
-            )
-            continue
-        if abs(right.lag_seconds) > max_lag_seconds + 1e-9:
-            plan.skipped_notes.append(
-                f"Skip span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(right lag {right.lag_seconds:+.3f}s exceeds ±{max_lag_seconds:.3f}s)."
-            )
-            continue
-        if abs(right.lag_seconds - left.lag_seconds) > max_lag_jump_seconds + 1e-9:
-            plan.skipped_notes.append(
-                f"Skip lag-jump span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(Δlag={right.lag_seconds - left.lag_seconds:+.3f}s)."
-            )
-            continue
-        speed = recon_span / base_span
-        if speed < min_speed or speed > max_speed:
-            plan.skipped_notes.append(
-                f"Skip content-diff span {left.base_time:.2f}–{right.base_time:.2f}s "
-                f"(implied speed={speed:.4f} outside [{min_speed:.3f},{max_speed:.3f}])."
-            )
-            continue
-        # Near-identity: skip to avoid needless resampling noise.
-        if (
-            abs(speed - 1.0) < 1e-4
-            and abs(left.lag_seconds) < 1e-4
-            and abs(right.lag_seconds) < 1e-4
+    # Interpolate only inside runs where consecutive knots are close enough.
+    i = 0
+    while i < len(ordered):
+        j = i
+        while (
+            j + 1 < len(ordered)
+            and (times[j + 1] - times[j]) <= interp_gap_seconds + 1e-9
         ):
-            continue
-        plan.segments.append(
-            FineWarpSegment(
-                base_start=left.base_time,
-                base_end=right.base_time,
-                recon_start=left.recon_time,
-                recon_end=right.recon_time,
-                speed=float(speed),
-                score=float(min(left.score, right.score)),
-            )
-        )
-    if not plan.segments and not plan.skipped_notes:
-        plan.skipped_notes.append("Anchors matched but no non-trivial fine warps needed.")
-    return plan
+            j += 1
+        if j > i:
+            t0 = float(times[i])
+            t1 = float(times[j])
+            mask = (sample_t >= t0) & (sample_t <= t1)
+            if np.any(mask):
+                curve[mask] = np.interp(sample_t[mask], times[i : j + 1], lags[i : j + 1])
+        elif interp_gap_seconds > 0:
+            # Isolated knot: apply constant lag in a short island around it.
+            half = 0.5 * min(interp_gap_seconds, 1.0)
+            mask = np.abs(sample_t - times[i]) <= half
+            curve[mask] = lags[i]
+        i = j + 1
+    return curve
 
 
-def _ensure_2d(samples: NDArray[np.floating]) -> NDArray[np.float64]:
-    arr = np.asarray(samples, dtype=np.float64)
-    if arr.ndim == 1:
-        return arr[np.newaxis, :]
-    return arr
-
-
-def apply_fine_warps(
+def apply_lag_curve(
     recon_samples: NDArray[np.floating],
     sample_rate: int,
-    segments: list[FineWarpSegment],
+    lag_curve: NDArray[np.floating],
 ) -> NDArray[np.floating]:
-    """Remap reconstructed audio onto the base timeline with piecewise linear warps.
+    """Resample reconstructed audio with ``out[t] = recon[t + L(t)]``."""
+    recon = np.asarray(recon_samples, dtype=np.float64)
+    mono = recon.ndim == 1
+    if mono:
+        recon_2d = recon[np.newaxis, :]
+    else:
+        recon_2d = recon
+    channels, n = int(recon_2d.shape[0]), int(recon_2d.shape[-1])
+    if lag_curve.size != n:
+        # Trim/pad lag curve to audio length.
+        curve = np.zeros(n, dtype=np.float64)
+        m = min(n, int(lag_curve.size))
+        curve[:m] = np.asarray(lag_curve[:m], dtype=np.float64)
+    else:
+        curve = np.asarray(lag_curve, dtype=np.float64)
 
-    Outside planned segments the mapping is identity. Multi-channel input keeps
-    channel count; mono may be 1-D or ``(1, n)``.
-    """
-    if not segments:
+    if float(np.max(np.abs(curve))) < 1e-9:
         return np.asarray(recon_samples)
 
-    recon = _ensure_2d(recon_samples)
-    channels, n = int(recon.shape[0]), int(recon.shape[-1])
     out = np.empty((channels, n), dtype=np.float64)
-    # Default identity map: src index == dst index.
-    src_index = np.arange(n, dtype=np.float64)
-
-    for seg in segments:
-        start_i = max(0, int(round(seg.base_start * sample_rate)))
-        end_i = min(n, int(round(seg.base_end * sample_rate)))
-        if end_i - start_i < 2:
-            continue
-        base_span = max(1e-9, seg.base_end - seg.base_start)
-        # Linear map base_time → recon_time within the segment.
-        t_frac = (
-            np.arange(start_i, end_i, dtype=np.float64) / sample_rate - seg.base_start
-        ) / base_span
-        t_frac = np.clip(t_frac, 0.0, 1.0)
-        recon_t = seg.recon_start + t_frac * (seg.recon_end - seg.recon_start)
-        src_index[start_i:end_i] = recon_t * sample_rate
-
-    np.clip(src_index, 0.0, float(n - 1), out=src_index)
+    sample_t = np.arange(n, dtype=np.float64) / float(sample_rate)
+    src_t = sample_t + curve
+    src_index = np.clip(src_t * sample_rate, 0.0, float(n - 1))
 
     for start in range(0, n, _WARP_BLOCK):
         end = min(n, start + _WARP_BLOCK)
@@ -352,11 +358,76 @@ def apply_fine_warps(
         i1 = np.minimum(i0 + 1, n - 1)
         frac = pos - i0.astype(np.float64)
         for c in range(channels):
-            out[c, start:end] = recon[c, i0] * (1.0 - frac) + recon[c, i1] * frac
+            out[c, start:end] = recon_2d[c, i0] * (1.0 - frac) + recon_2d[c, i1] * frac
 
-    if np.asarray(recon_samples).ndim == 1:
+    if mono:
         return out[0]
     return out
+
+
+def plan_lag_field(
+    base_samples: NDArray[np.floating],
+    recon_samples: NDArray[np.floating],
+    sample_rate: int,
+    *,
+    max_lag_seconds: float = 0.15,
+    window_seconds: float = 3.0,
+    step_seconds: float = 1.0,
+    min_score: float = 0.35,
+    min_score_margin: float = 0.05,
+    min_improvement: float = 0.02,
+    neighbor_radius_seconds: float = 4.0,
+    neighbor_step_seconds: float = 1.0,
+    max_lag_jump_seconds: float = 0.04,
+    interp_gap_seconds: float = 3.0,
+    hop_seconds: float = 0.01,
+    frame_seconds: float = 0.04,
+) -> tuple[NDArray[np.float64], FineWarpPlan]:
+    """Estimate a lag curve from mono mixes; return curve + plan (not yet applied)."""
+    base_mono = np.asarray(base_samples, dtype=np.float64)
+    if base_mono.ndim == 2:
+        base_mono = base_mono.mean(axis=0)
+    recon_arr = np.asarray(recon_samples, dtype=np.float64)
+    recon_mono = recon_arr.mean(axis=0) if recon_arr.ndim == 2 else recon_arr
+    n = min(base_mono.size, recon_mono.size)
+    base_mono = base_mono[:n]
+    recon_mono = recon_mono[:n]
+    duration = float(n / sample_rate) if sample_rate else 0.0
+
+    base_env, hop = rms_envelope(
+        base_mono, sample_rate, hop_seconds=hop_seconds, frame_seconds=frame_seconds
+    )
+    recon_env, _ = rms_envelope(
+        recon_mono, sample_rate, hop_seconds=hop_seconds, frame_seconds=frame_seconds
+    )
+    hop = float(hop) if hop > 0 else hop_seconds
+
+    raw_knots, notes = estimate_lag_knots(
+        base_env,
+        recon_env,
+        hop=hop,
+        duration_seconds=duration,
+        window_seconds=window_seconds,
+        step_seconds=step_seconds,
+        max_lag_seconds=max_lag_seconds,
+        min_score=min_score,
+        min_score_margin=min_score_margin,
+        min_improvement=min_improvement,
+        neighbor_radius_seconds=neighbor_radius_seconds,
+        neighbor_step_seconds=neighbor_step_seconds,
+    )
+    knots, smooth_notes = smooth_lag_knots(
+        raw_knots,
+        max_lag_jump_seconds=max_lag_jump_seconds,
+    )
+    plan = FineWarpPlan(knots=knots, skipped_notes=[*notes, *smooth_notes])
+    curve = lag_curve_from_knots(
+        knots,
+        duration_seconds=duration,
+        sample_rate=sample_rate,
+        interp_gap_seconds=interp_gap_seconds,
+    )
+    return curve, plan
 
 
 def plan_and_apply_fine_warp(
@@ -364,53 +435,43 @@ def plan_and_apply_fine_warp(
     recon_samples: NDArray[np.floating],
     sample_rate: int,
     *,
-    max_lag_seconds: float = 0.12,
-    window_seconds: float = 0.45,
-    min_score: float = 0.55,
-    min_score_margin: float = 0.08,
-    min_speed: float = 0.97,
-    max_speed: float = 1.03,
-    min_span_seconds: float = 0.4,
-    max_span_seconds: float = 4.0,
-    max_lag_jump_seconds: float = 0.05,
-    prominence: float = 0.28,
-    min_distance_seconds: float = 0.75,
+    max_lag_seconds: float = 0.15,
+    window_seconds: float = 3.0,
+    step_seconds: float = 1.0,
+    min_score: float = 0.35,
+    min_score_margin: float = 0.05,
+    min_improvement: float = 0.02,
+    neighbor_radius_seconds: float = 4.0,
+    neighbor_step_seconds: float = 1.0,
+    max_lag_jump_seconds: float = 0.04,
+    interp_gap_seconds: float = 3.0,
 ) -> tuple[NDArray[np.floating], FineWarpPlan]:
-    """Match strong onsets, plan short mild warps, and return warped audio."""
+    """Build a neighborhood-validated lag field and apply it to reconstructed audio."""
+    recon_arr = np.asarray(recon_samples, dtype=np.float64)
     base_mono = np.asarray(base_samples, dtype=np.float64)
     if base_mono.ndim == 2:
         base_mono = base_mono.mean(axis=0)
-    recon_arr = np.asarray(recon_samples, dtype=np.float64)
     recon_mono = recon_arr.mean(axis=0) if recon_arr.ndim == 2 else recon_arr
-
-    n = min(base_mono.size, recon_mono.size)
-    base_mono = base_mono[:n]
+    n = min(base_mono.size, recon_mono.size if recon_arr.ndim == 1 else recon_arr.shape[-1])
     if recon_arr.ndim == 2:
         recon_work = recon_arr[:, :n]
-        recon_mono = recon_mono[:n]
     else:
         recon_work = recon_arr[:n]
-        recon_mono = recon_work
 
-    anchors = match_onset_anchors(
-        base_mono,
-        recon_mono,
+    curve, plan = plan_lag_field(
+        base_mono[:n],
+        recon_work,
         sample_rate,
         max_lag_seconds=max_lag_seconds,
         window_seconds=window_seconds,
+        step_seconds=step_seconds,
         min_score=min_score,
         min_score_margin=min_score_margin,
-        prominence=prominence,
-        min_distance_seconds=min_distance_seconds,
-    )
-    plan = plan_fine_warps(
-        anchors,
-        min_speed=min_speed,
-        max_speed=max_speed,
-        min_span_seconds=min_span_seconds,
-        max_span_seconds=max_span_seconds,
-        max_lag_seconds=max_lag_seconds,
+        min_improvement=min_improvement,
+        neighbor_radius_seconds=neighbor_radius_seconds,
+        neighbor_step_seconds=neighbor_step_seconds,
         max_lag_jump_seconds=max_lag_jump_seconds,
+        interp_gap_seconds=interp_gap_seconds,
     )
-    warped = apply_fine_warps(recon_work, sample_rate, plan.segments)
+    warped = apply_lag_curve(recon_work, sample_rate, curve)
     return warped, plan

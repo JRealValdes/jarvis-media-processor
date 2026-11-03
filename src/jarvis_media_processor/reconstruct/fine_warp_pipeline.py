@@ -1,4 +1,4 @@
-"""Run piecewise fine-warp on a reconstructed WAV against base track 0."""
+"""Run windowed fine-warp on a reconstructed WAV against base track 0."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from jarvis_media_processor.media.errors import MediaFileNotFoundError
 from jarvis_media_processor.reconstruct.extract import extract_donor_wav
 from jarvis_media_processor.reconstruct.fine_warp import (
     FineWarpPlan,
-    FineWarpSegment,
+    LagKnot,
     plan_and_apply_fine_warp,
 )
 
@@ -30,39 +30,27 @@ class FineWarpResult(BaseModel):
     sample_rate: int
     channels: int
     duration_seconds: float
-    anchor_count: int = 0
-    segment_count: int = 0
-    segments: list[dict[str, float]] = Field(default_factory=list)
+    knot_count: int = 0
+    knots: list[dict[str, float]] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     plan_json: Path | None = None
 
 
-def _segments_as_dicts(segments: list[FineWarpSegment]) -> list[dict[str, float]]:
+def _knots_as_dicts(knots: list[LagKnot]) -> list[dict[str, float]]:
     return [
         {
-            "base_start": s.base_start,
-            "base_end": s.base_end,
-            "recon_start": s.recon_start,
-            "recon_end": s.recon_end,
-            "speed": s.speed,
-            "score": s.score,
+            "time_seconds": k.time_seconds,
+            "lag_seconds": k.lag_seconds,
+            "score": k.score,
+            "improvement": k.improvement,
         }
-        for s in segments
+        for k in knots
     ]
 
 
 def _write_plan_json(path: Path, plan: FineWarpPlan) -> None:
     payload = {
-        "anchors": [
-            {
-                "base_time": a.base_time,
-                "recon_time": a.recon_time,
-                "lag_seconds": a.lag_seconds,
-                "score": a.score,
-            }
-            for a in plan.anchors
-        ],
-        "segments": _segments_as_dicts(plan.segments),
+        "knots": _knots_as_dicts(plan.knots),
         "skipped_notes": list(plan.skipped_notes),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -78,15 +66,7 @@ def fine_warp_reconstructed_audio(
 ) -> FineWarpResult:
     """Fine-warp reconstructed donor audio to better match base track 0.
 
-    Args:
-        base_path: Base media (first audio stream is the reference).
-        reconstructed_wav: WAV from ``jmp reconstruct`` (already on base timeline).
-        workspace: Directory for base extract, plan JSON, and output WAV.
-        settings: Optional settings.
-        output_name: Filename for the warped WAV inside ``workspace``.
-
-    Returns:
-        ``FineWarpResult`` with paths and summary counts.
+    Uses a windowed lag field accepted only when the neighborhood improves.
     """
     cfg = settings or get_settings()
     base = Path(base_path)
@@ -123,15 +103,14 @@ def fine_warp_reconstructed_audio(
         sample_rate,
         max_lag_seconds=cfg.fine_warp_max_lag_seconds,
         window_seconds=cfg.fine_warp_window_seconds,
+        step_seconds=cfg.fine_warp_step_seconds,
         min_score=cfg.fine_warp_min_score,
         min_score_margin=cfg.fine_warp_min_score_margin,
-        min_speed=cfg.fine_warp_min_speed,
-        max_speed=cfg.fine_warp_max_speed,
-        min_span_seconds=cfg.fine_warp_min_span_seconds,
-        max_span_seconds=cfg.fine_warp_max_span_seconds,
+        min_improvement=cfg.fine_warp_min_improvement,
+        neighbor_radius_seconds=cfg.fine_warp_neighbor_radius_seconds,
+        neighbor_step_seconds=cfg.fine_warp_neighbor_step_seconds,
         max_lag_jump_seconds=cfg.fine_warp_max_lag_jump_seconds,
-        prominence=cfg.fine_warp_prominence,
-        min_distance_seconds=cfg.fine_warp_min_distance_seconds,
+        interp_gap_seconds=cfg.fine_warp_interp_gap_seconds,
     )
 
     out_wav = work / output_name
@@ -141,18 +120,12 @@ def fine_warp_reconstructed_audio(
 
     n = int(warped.shape[-1]) if getattr(warped, "ndim", 1) >= 1 else 0
     notes = [
-        f"anchors={len(plan.anchors)}",
-        f"segments={len(plan.segments)}",
+        f"knots={len(plan.knots)}",
         *plan.skipped_notes[:20],
     ]
     if len(plan.skipped_notes) > 20:
         notes.append(f"...and {len(plan.skipped_notes) - 20} more skip notes.")
-    logger.info(
-        "Fine-warp: %d anchors → %d segments → %s",
-        len(plan.anchors),
-        len(plan.segments),
-        out_wav,
-    )
+    logger.info("Fine-warp: %d lag knots → %s", len(plan.knots), out_wav)
 
     return FineWarpResult(
         base_path=base,
@@ -161,9 +134,8 @@ def fine_warp_reconstructed_audio(
         sample_rate=sample_rate,
         channels=channels,
         duration_seconds=float(n / sample_rate) if sample_rate else 0.0,
-        anchor_count=len(plan.anchors),
-        segment_count=len(plan.segments),
-        segments=_segments_as_dicts(plan.segments),
+        knot_count=len(plan.knots),
+        knots=_knots_as_dicts(plan.knots),
         notes=notes,
         plan_json=plan_path,
     )

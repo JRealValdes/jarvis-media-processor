@@ -186,55 +186,48 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Post-reconstruct piecewise fine-warp (base track 0 vs reconstructed WAV)
+    # Post-reconstruct windowed lag field (base track 0 vs reconstructed WAV)
     fine_warp_max_lag_seconds: float = Field(
-        default=0.12,
-        description="Maximum |lag| when pairing onset anchors for fine-warp.",
+        default=0.15,
+        description="Maximum |lag| searched in each analysis window.",
     )
     fine_warp_window_seconds: float = Field(
-        default=0.45,
-        description="Envelope window around each onset when estimating local lag.",
+        default=3.0,
+        description="Envelope window length when estimating local lag.",
+    )
+    fine_warp_step_seconds: float = Field(
+        default=1.0,
+        description="Step between analysis window centers.",
+    )
+    fine_warp_neighbor_radius_seconds: float = Field(
+        default=4.0,
+        description="Neighborhood radius when checking if a lag improves overall.",
+    )
+    fine_warp_neighbor_step_seconds: float = Field(
+        default=1.0,
+        description="Step between neighbor windows in the improvement check.",
     )
     fine_warp_min_score: float = Field(
-        default=0.55,
-        description="Minimum local envelope correlation to accept an onset anchor.",
+        default=0.35,
+        description="Minimum local envelope correlation to consider a lag.",
     )
     fine_warp_min_score_margin: float = Field(
-        default=0.08,
+        default=0.05,
+        description="Best lag must beat lag=0 by at least this correlation margin.",
+    )
+    fine_warp_min_improvement: float = Field(
+        default=0.02,
         description=(
-            "Best lag must beat lag=0 correlation by at least this margin "
-            "(rejects ambiguous dialogue matches)."
-        ),
-    )
-    fine_warp_prominence: float = Field(
-        default=0.28,
-        description="Minimum normalized envelope prominence for base onset landmarks.",
-    )
-    fine_warp_min_distance_seconds: float = Field(
-        default=0.75,
-        description="Minimum spacing between candidate onset landmarks.",
-    )
-    fine_warp_min_speed: float = Field(
-        default=0.97,
-        description="Minimum implied speed between anchors; outside → skip span.",
-    )
-    fine_warp_max_speed: float = Field(
-        default=1.03,
-        description="Maximum implied speed between anchors; outside → skip span.",
-    )
-    fine_warp_min_span_seconds: float = Field(
-        default=0.4,
-        description="Ignore fine-warp spans shorter than this.",
-    )
-    fine_warp_max_span_seconds: float = Field(
-        default=4.0,
-        description=(
-            "Never warp spans longer than this (avoids multi-minute rubber-banding)."
+            "Minimum neighborhood mean-correlation gain vs lag=0 to accept a knot."
         ),
     )
     fine_warp_max_lag_jump_seconds: float = Field(
-        default=0.05,
-        description="Drop anchors / spans whose lag jumps more than this vs neighbors.",
+        default=0.04,
+        description="Drop knots whose lag jumps more than this vs the previous kept knot.",
+    )
+    fine_warp_interp_gap_seconds: float = Field(
+        default=3.0,
+        description="Interpolate lag only between knots at most this far apart.",
     )
 
     # Processing report / manual-review thresholds
