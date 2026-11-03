@@ -186,48 +186,45 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Post-reconstruct windowed lag field (base track 0 vs reconstructed WAV)
+    # Post-reconstruct dense lag field (base track 0 vs reconstructed WAV)
     fine_warp_max_lag_seconds: float = Field(
-        default=0.15,
-        description="Maximum |lag| searched in each analysis window.",
+        default=1.0,
+        description="Maximum |lag| searched per window (residual after reconstruct).",
     )
     fine_warp_window_seconds: float = Field(
-        default=3.0,
-        description="Envelope window length when estimating local lag.",
+        default=4.0,
+        description="Onset-envelope window length when estimating local lag.",
     )
     fine_warp_step_seconds: float = Field(
-        default=1.0,
-        description="Step between analysis window centers.",
+        default=2.0,
+        description="Step between dense analysis window centers.",
     )
-    fine_warp_neighbor_radius_seconds: float = Field(
-        default=4.0,
-        description="Neighborhood radius when checking if a lag improves overall.",
+    fine_warp_context_window_seconds: float = Field(
+        default=10.0,
+        description="Wider window used to score big-picture improvement vs lag=0.",
     )
-    fine_warp_neighbor_step_seconds: float = Field(
-        default=1.0,
-        description="Step between neighbor windows in the improvement check.",
+    fine_warp_prior_weight: float = Field(
+        default=0.15,
+        description="Blend weight pulling weak local lags toward the global prior.",
     )
-    fine_warp_min_score: float = Field(
-        default=0.35,
-        description="Minimum local envelope correlation to consider a lag.",
+    fine_warp_smooth_seconds: float = Field(
+        default=30.0,
+        description="Temporal smoothing radius for the dense lag field.",
     )
-    fine_warp_min_score_margin: float = Field(
-        default=0.05,
-        description="Best lag must beat lag=0 by at least this correlation margin.",
-    )
-    fine_warp_min_improvement: float = Field(
-        default=0.02,
+    fine_warp_confidence_tau: float = Field(
+        default=0.08,
         description=(
-            "Minimum neighborhood mean-correlation gain vs lag=0 to accept a knot."
+            "Confidence floor for post-smooth gating; low-confidence steps fall "
+            "back to the global lag prior (prevents smooth bleed)."
         ),
     )
-    fine_warp_max_lag_jump_seconds: float = Field(
-        default=0.04,
-        description="Drop knots whose lag jumps more than this vs the previous kept knot.",
+    fine_warp_band_low_hz: float = Field(
+        default=300.0,
+        description="High-pass corner before onset envelope (reduce dialogue body).",
     )
-    fine_warp_interp_gap_seconds: float = Field(
-        default=3.0,
-        description="Interpolate lag only between knots at most this far apart.",
+    fine_warp_band_high_hz: float = Field(
+        default=6000.0,
+        description="Low-pass corner before onset envelope.",
     )
 
     # Processing report / manual-review thresholds

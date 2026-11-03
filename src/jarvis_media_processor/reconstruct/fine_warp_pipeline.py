@@ -1,4 +1,4 @@
-"""Run windowed fine-warp on a reconstructed WAV against base track 0."""
+"""Run dense fine-warp on a reconstructed WAV against base track 0."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class FineWarpResult(BaseModel):
     channels: int
     duration_seconds: float
     knot_count: int = 0
+    global_lag_seconds: float = 0.0
     knots: list[dict[str, float]] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     plan_json: Path | None = None
@@ -43,6 +44,7 @@ def _knots_as_dicts(knots: list[LagKnot]) -> list[dict[str, float]]:
             "lag_seconds": k.lag_seconds,
             "score": k.score,
             "improvement": k.improvement,
+            "confidence": k.confidence,
         }
         for k in knots
     ]
@@ -50,6 +52,7 @@ def _knots_as_dicts(knots: list[LagKnot]) -> list[dict[str, float]]:
 
 def _write_plan_json(path: Path, plan: FineWarpPlan) -> None:
     payload = {
+        "global_lag_seconds": plan.global_lag_seconds,
         "knots": _knots_as_dicts(plan.knots),
         "skipped_notes": list(plan.skipped_notes),
     }
@@ -66,7 +69,7 @@ def fine_warp_reconstructed_audio(
 ) -> FineWarpResult:
     """Fine-warp reconstructed donor audio to better match base track 0.
 
-    Uses a windowed lag field accepted only when the neighborhood improves.
+    Dense onset-envelope lag field with global prior (no zero-gap islands).
     """
     cfg = settings or get_settings()
     base = Path(base_path)
@@ -104,13 +107,12 @@ def fine_warp_reconstructed_audio(
         max_lag_seconds=cfg.fine_warp_max_lag_seconds,
         window_seconds=cfg.fine_warp_window_seconds,
         step_seconds=cfg.fine_warp_step_seconds,
-        min_score=cfg.fine_warp_min_score,
-        min_score_margin=cfg.fine_warp_min_score_margin,
-        min_improvement=cfg.fine_warp_min_improvement,
-        neighbor_radius_seconds=cfg.fine_warp_neighbor_radius_seconds,
-        neighbor_step_seconds=cfg.fine_warp_neighbor_step_seconds,
-        max_lag_jump_seconds=cfg.fine_warp_max_lag_jump_seconds,
-        interp_gap_seconds=cfg.fine_warp_interp_gap_seconds,
+        context_window_seconds=cfg.fine_warp_context_window_seconds,
+        prior_weight=cfg.fine_warp_prior_weight,
+        smooth_seconds=cfg.fine_warp_smooth_seconds,
+        confidence_tau=cfg.fine_warp_confidence_tau,
+        band_low_hz=cfg.fine_warp_band_low_hz,
+        band_high_hz=cfg.fine_warp_band_high_hz,
     )
 
     out_wav = work / output_name
@@ -121,11 +123,15 @@ def fine_warp_reconstructed_audio(
     n = int(warped.shape[-1]) if getattr(warped, "ndim", 1) >= 1 else 0
     notes = [
         f"knots={len(plan.knots)}",
+        f"global_lag={plan.global_lag_seconds:+.3f}s",
         *plan.skipped_notes[:20],
     ]
-    if len(plan.skipped_notes) > 20:
-        notes.append(f"...and {len(plan.skipped_notes) - 20} more skip notes.")
-    logger.info("Fine-warp: %d lag knots → %s", len(plan.knots), out_wav)
+    logger.info(
+        "Fine-warp: %d dense knots (global %+0.3fs) → %s",
+        len(plan.knots),
+        plan.global_lag_seconds,
+        out_wav,
+    )
 
     return FineWarpResult(
         base_path=base,
@@ -135,6 +141,7 @@ def fine_warp_reconstructed_audio(
         channels=channels,
         duration_seconds=float(n / sample_rate) if sample_rate else 0.0,
         knot_count=len(plan.knots),
+        global_lag_seconds=plan.global_lag_seconds,
         knots=_knots_as_dicts(plan.knots),
         notes=notes,
         plan_json=plan_path,
