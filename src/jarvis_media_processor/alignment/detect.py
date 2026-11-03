@@ -13,6 +13,7 @@ from jarvis_media_processor.alignment.activity_sync import (
     activity_time_pairs,
     estimate_speed_offset_activity,
 )
+from jarvis_media_processor.alignment.curve_walk import CurveLock
 from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
     estimate_alignment,
@@ -41,6 +42,29 @@ from jarvis_media_processor.video.confirm import make_frame_confirmer
 from jarvis_media_processor.video.models import FrameCorrespondence, VisualMatchReport
 
 logger = logging.getLogger(__name__)
+
+
+def _lock_for_donor_chunk(
+    locks: list[CurveLock],
+    start: float,
+    end: float,
+) -> CurveLock | None:
+    """Pick the walk lock that belongs to a donor keep-range.
+
+    Blind cross-correlation of a mid-timeline donor slice against the full base
+    often latches onto a false offset; the curve-walk resume lock is trusted.
+    """
+    if not locks:
+        return None
+    inside = [
+        lock
+        for lock in locks
+        if start - 1e-6 <= lock.donor_time <= end + 1e-6
+    ]
+    if inside:
+        return max(inside, key=lambda lock: (lock.base_time, lock.score))
+    mid = 0.5 * (start + end)
+    return min(locks, key=lambda lock: abs(lock.donor_time - mid))
 
 
 def _envelope_from_report(
@@ -110,6 +134,7 @@ def detect_alignment_from_artifacts(
             audio_downweight=audio_downweight,
             speed_min=speed_min,
             speed_max=speed_max,
+            donor_exclude=excluded or None,
         )
     else:
         doc = estimate_alignment(
@@ -210,12 +235,21 @@ def _activity_pairs_from_report(
         chunk = slice_envelope(donor_env, start, end)
         if chunk is None:
             continue
-        chunk_sync = estimate_speed_offset_activity(
-            base_env,
-            chunk,
-            speed_min=cfg.alignment_speed_min,
-            speed_max=cfg.alignment_speed_max,
-        )
+        walk_lock = _lock_for_donor_chunk(walk.locks, start, end)
+        if walk_lock is not None:
+            chunk_sync = ActivitySyncResult(
+                speed=float(walk_lock.speed),
+                offset_seconds=float(walk_lock.offset_seconds),
+                score=float(walk_lock.score),
+                method="curve_walk_lock",
+            )
+        else:
+            chunk_sync = estimate_speed_offset_activity(
+                base_env,
+                chunk,
+                speed_min=cfg.alignment_speed_min,
+                speed_max=cfg.alignment_speed_max,
+            )
         chunk_pairs = activity_time_pairs(base_env, chunk, sync=chunk_sync)
         pairs.extend(chunk_pairs)
         if chunk_sync.score > best_chunk_score:

@@ -11,6 +11,7 @@ from jarvis_media_processor.alignment import (
     SyncStrategyLevel,
     detect_alignment_from_landmarks,
     estimate_alignment,
+    estimate_alignment_per_donor_chunk,
     estimate_alignment_visual_first,
 )
 from jarvis_media_processor.alignment.detect import detect_alignment_from_artifacts
@@ -256,6 +257,101 @@ def test_weak_audio_does_not_replace_strong_visual_offset() -> None:
         merged_naive.global_offset_seconds is not None
         and abs(merged_naive.global_offset_seconds - (-8.0)) < 0.2
     )
+
+
+def test_per_donor_chunk_recovers_dual_offsets_around_ad() -> None:
+    """Mid-roll ad ⇒ two legitimate offsets; chunked fit should keep both."""
+    pre_offset = -28.0
+    post_offset = -4.0
+    ad = (180.0, 204.0)
+    visual = [
+        TimePair(float(t), float(t) + pre_offset, 0.95, "video_match")
+        for t in range(40, 180, 8)
+    ] + [
+        TimePair(float(t), float(t) + post_offset, 0.95, "video_match")
+        for t in range(210, 520, 8)
+    ]
+    keep = [(0.0, ad[0]), (ad[1], 600.0)]
+    doc = estimate_alignment_per_donor_chunk(
+        visual,
+        keep,
+        base_duration=600.0,
+        donor_duration=624.0,
+        inlier_tolerance=1.5,
+        min_inlier_ratio=0.55,
+        min_chunk_pairs=6,
+    )
+    assert doc is not None
+    assert doc.strategy == SyncStrategyLevel.PIECEWISE
+    assert int(doc.evidence.get("fitted_chunks", 0)) == 2
+    offsets = sorted(seg.offset_seconds for seg in doc.segments)
+    assert abs(offsets[0] - pre_offset) < 0.5
+    assert abs(offsets[1] - post_offset) < 0.5
+
+
+def test_per_donor_chunk_falls_back_to_phash_when_activity_pollutes() -> None:
+    """Wrong activity offsets in a chunk must not block a clean pHash fit."""
+    pre_offset = -28.0
+    post_offset = -4.0
+    visual = [
+        TimePair(float(t), float(t) + pre_offset, 0.95, "video_match")
+        for t in range(40, 180, 8)
+    ] + [
+        TimePair(float(t), float(t) + post_offset, 0.95, "video_match")
+        for t in range(210, 520, 8)
+    ] + [
+        TimePair(float(t), 0.96 * float(t) - 11.0, 1.2, "video_activity_peak")
+        for t in range(220, 500, 8)
+    ]
+    doc = estimate_alignment_per_donor_chunk(
+        visual,
+        [(0.0, 180.0), (204.0, 600.0)],
+        base_duration=600.0,
+        donor_duration=624.0,
+        inlier_tolerance=1.5,
+        min_chunk_pairs=6,
+    )
+    assert doc is not None
+    assert int(doc.evidence.get("fitted_chunks", 0)) == 2
+    offsets = sorted(seg.offset_seconds for seg in doc.segments)
+    assert abs(offsets[0] - pre_offset) < 0.5
+    assert abs(offsets[1] - post_offset) < 0.5
+    assert any("pHash-only" in n for n in doc.notes)
+
+
+def test_visual_first_uses_chunked_fit_when_donor_exclude_set() -> None:
+    pre_offset = -28.0
+    post_offset = -4.0
+    visual = [
+        TimePair(float(t), float(t) + pre_offset, 0.95, "video_match")
+        for t in range(40, 180, 8)
+    ] + [
+        # Contaminating pairs whose donor times sit inside the excluded ad.
+        TimePair(100.0 + i, 182.0 + i, 0.9, "video_match")
+        for i in range(0, 20, 5)
+    ] + [
+        TimePair(float(t), float(t) + post_offset, 0.95, "video_match")
+        for t in range(210, 520, 8)
+    ]
+    audio = [
+        TimePair(float(t), float(t) - 50.0, 0.95, "audio_landmark")
+        for t in (50, 100, 150, 250, 300)
+    ]
+    doc = estimate_alignment_visual_first(
+        visual,
+        audio,
+        base_duration=600.0,
+        donor_duration=624.0,
+        visual_inlier_tolerance=1.5,
+        min_visual_pairs=8,
+        donor_exclude=[(180.0, 204.0)],
+    )
+    assert doc.strategy == SyncStrategyLevel.PIECEWISE
+    assert doc.evidence.get("fusion") == "visual_chunked_exclusions"
+    assert int(doc.evidence.get("fitted_chunks", 0)) == 2
+    offsets = sorted(seg.offset_seconds for seg in doc.segments)
+    assert abs(offsets[0] - pre_offset) < 0.5
+    assert abs(offsets[1] - post_offset) < 0.5
 
 
 def test_detect_from_artifacts_uses_visual_first() -> None:

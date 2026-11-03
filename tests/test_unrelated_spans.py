@@ -75,6 +75,41 @@ def test_curve_walk_finds_inserted_ad_block() -> None:
     )
 
 
+def test_curve_walk_prefers_long_surplus_over_short_false_peak() -> None:
+    """A brief mid-insert activity coincidence must not truncate a long ad."""
+    # Same shape as the flat-ad fixture, but the insert is longer and contains a
+    # single decoy peak that would look like a +12s resume if score-only.
+    base_pulses = list(range(2, 80, 4))
+    base = _pulse_envelope(80, base_pulses)
+    pre = list(range(2, 40, 4))
+    decoy = [52]
+    post = [80 + (i - 40) for i in range(42, 80, 4)]
+    donor = _pulse_envelope(120, pre + decoy + post)
+    result = walk_activity_curves(
+        base,
+        donor,
+        half_window=6.0,
+        hop_seconds=2.0,
+        min_score=0.25,
+        break_score=0.18,
+        confirm_seconds=4.0,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=100.0,
+        missing_base_fill_seconds=3.0,
+    )
+    assert result.unrelated_donor_intervals, "expected surplus donor span"
+    # True insert is ~40s; a short false resume ending near the decoy (~52) must
+    # not win over the full jump (surplus end near the real post train).
+    assert any(
+        (s.end - s.start) >= 30 and s.end >= 75
+        for s in result.unrelated_donor_intervals
+    )
+    assert not any(
+        s.end <= 60 and (s.end - s.start) < 25
+        for s in result.unrelated_donor_intervals
+    )
+
+
 def test_initial_lock_takes_earliest_confirm_not_max_score() -> None:
     """A later louder peak against the donor head must not hide an early lock."""
     # Shared early pulse train (true lock ~ offset 0). Later, a single huge

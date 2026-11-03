@@ -20,6 +20,7 @@ from jarvis_media_processor.alignment.audio_refine import (
 )
 from jarvis_media_processor.alignment.estimate import (
     estimate_alignment,
+    estimate_alignment_per_donor_chunk,
     estimate_alignment_visual_first,
 )
 from jarvis_media_processor.alignment.models import (
@@ -55,6 +56,7 @@ __all__ = [
     "detect_curve_gaps",
     "detect_unrelated_donor_spans",
     "estimate_alignment",
+    "estimate_alignment_per_donor_chunk",
     "walk_activity_curves",
     "estimate_alignment_visual_first",
     "estimate_fine_audio_offset",
