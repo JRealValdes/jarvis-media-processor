@@ -916,17 +916,18 @@ def walk_activity_curves(
             and frame_confirm is not None
         ):
             missing_hit = None
-        # A *strong* picture-backed missing jump outranks a mild speed refine
-        # (half-window bleed into a real cut). Weak/short framed hits must not
-        # veto speed refine on cross-encode jitter.
-        if (
-            missing_hit is not None
-            and speed_hit is not None
-            and frame_confirm is not None
-            and missing_hit[1] >= 0.65
-            and missing_hit[0] - break_base >= max(min_missing, 15.0)
-        ):
-            speed_hit = None
+        # Speed refine vs missing: short framed "missing" jumps on cross-encode
+        # film are usually lock noise while a mild speed still explains the
+        # break (e.g. ~15s alias score ~0.79 beating speed ~0.64). Real mid
+        # cuts (synth ~30s) typically leave speed_hit None. Only a *long*
+        # strong missing may veto speed; otherwise prefer speed and drop the
+        # short missing hypothesis.
+        if missing_hit is not None and speed_hit is not None:
+            _miss_gap = float(missing_hit[0]) - float(break_base)
+            if _miss_gap < 30.0:
+                missing_hit = None
+            elif frame_confirm is not None and float(missing_hit[1]) >= 0.65:
+                speed_hit = None
 
 
         # Rank hypotheses: (kind, score, payload). Human order at a break:
@@ -1533,9 +1534,9 @@ def _missing_gap_credible(
     """
     if picture_backed:
         # With frames, short picture hits are usually grade-mismatch aliases.
-        # Mid gaps need a solid activity score; long cuts (synth ~30s+) may be
-        # weaker on cross-grade activity and rely on frame agreement alone.
-        if gap < 15.0:
+        # Require a substantial cut (≥20s); mid gaps still need a solid score.
+        # Long cuts (synth ~30s+) may be weaker on activity and rely on frames.
+        if gap < 20.0:
             return False
         if gap < 30.0 and resume_score < 0.65:
             return False
