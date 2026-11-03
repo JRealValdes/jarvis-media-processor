@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from jarvis_media_processor.alignment.curve_walk import (
+    _find_forward_surplus,
     find_initial_lock,
     walk_activity_curves,
 )
@@ -53,6 +54,78 @@ def _donor_with_ad_block() -> tuple[ActivityEnvelope, ActivityEnvelope, tuple[fl
     return base, donor, (40.0, 60.0)
 
 
+def _donor_with_mid_speed_change() -> tuple[ActivityEnvelope, ActivityEnvelope, float]:
+    """Pre matches at speed 1.0; after ~40s the same content continues at 0.92.
+
+    Donor samples are interpolated from the base envelope (not snapped pulses),
+    so a wrong linear speed diverges clearly over a multi-hop horizon.
+    """
+    true_speed = 0.92
+    break_t = 40.0
+    base = _pulse_envelope(140, list(range(2, 140, 3)))
+    rem = float(base.times[-1] - break_t)
+    donor_end = break_t + true_speed * rem + 2.0
+    times = np.arange(0.0, donor_end + 0.5, base.sample_period)
+    values = np.zeros_like(times)
+    for i, t in enumerate(times):
+        if t <= break_t:
+            bq = float(t)
+        else:
+            bq = break_t + (float(t) - break_t) / true_speed
+        values[i] = float(np.interp(bq, base.times, base.values, left=0.0, right=0.0))
+    donor = ActivityEnvelope(
+        times=times, values=values, sample_period=base.sample_period
+    )
+    return base, donor, true_speed
+
+
+def test_curve_walk_refines_speed_instead_of_inventing_ad() -> None:
+    """A mild mid-timeline break from wrong speed must not become surplus."""
+    base, donor, true_speed = _donor_with_mid_speed_change()
+    result = walk_activity_curves(
+        base,
+        donor,
+        half_window=6.0,
+        hop_seconds=2.0,
+        min_score=0.25,
+        break_score=0.18,
+        confirm_seconds=6.0,
+        min_surplus_seconds=8.0,
+        max_surplus_seconds=80.0,
+        missing_base_fill_seconds=3.0,
+        # Force a wrong initial speed so the walk must refine mid-way.
+        speed_candidates=(1.0,),
+    )
+    assert not result.unrelated_donor_intervals, (
+        f"speed drift must not invent ads; got {result.unrelated_donor_intervals}"
+    )
+    assert any("Speed refine" in n for n in result.notes), result.notes
+    refined = [lock for lock in result.locks if abs(lock.speed - true_speed) < 0.04]
+    assert refined, f"expected a lock near {true_speed}; locks={result.locks}"
+
+
+def test_curve_walk_still_finds_ad_when_speed_refine_cannot_help() -> None:
+    """Real flat insert must still win over a bogus speed re-fit."""
+    base, donor, (ad0, ad1) = _donor_with_ad_block()
+    result = walk_activity_curves(
+        base,
+        donor,
+        half_window=6.0,
+        hop_seconds=2.0,
+        min_score=0.25,
+        break_score=0.18,
+        confirm_seconds=4.0,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=80.0,
+        missing_base_fill_seconds=3.0,
+    )
+    assert result.unrelated_donor_intervals, "expected surplus donor span"
+    assert any(
+        s.start <= ad0 + 10 and s.end >= ad1 - 10
+        for s in result.unrelated_donor_intervals
+    )
+
+
 def test_curve_walk_finds_inserted_ad_block() -> None:
     base, donor, (ad0, ad1) = _donor_with_ad_block()
     result = walk_activity_curves(
@@ -73,6 +146,46 @@ def test_curve_walk_finds_inserted_ad_block() -> None:
         s.start <= ad0 + 10 and s.end >= ad1 - 10
         for s in result.unrelated_donor_intervals
     )
+
+
+def test_forward_surplus_prefers_earliest_frame_supported_resume() -> None:
+    """A weak true post-ad lock with frames must beat a louder later alias."""
+    # Pre 0..40 match; flat insert 40..60; post resumes at donor 60 (= +20).
+    # A second pulse train at donor 88 creates a high-score +48 alias.
+    base = _pulse_envelope(100, list(range(2, 100, 4)))
+    pre = list(range(2, 40, 4))
+    post = [60 + (i - 40) for i in range(42, 100, 4)]
+    alias = [88 + (i - 40) for i in range(42, 60, 4)]
+    donor = _pulse_envelope(140, pre + post + alias)
+
+    def frame_confirm(base_t: float, donor_t: float) -> bool:
+        # True cut is base≈40 ↔ donor≈60; allow a couple hops of early break.
+        return abs((donor_t - base_t) - 20.0) <= 1.0 and 38.0 <= base_t <= 46.0
+
+    hit = _find_forward_surplus(
+        base,
+        donor,
+        base_time=40.0,
+        offset=0.0,
+        speed=1.0,
+        half_window=6.0,
+        period=1.0,
+        min_score=0.25,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=80.0,
+        break_score=0.18,
+        donor_start=0.0,
+        donor_end=139.0,
+        frame_confirm=frame_confirm,
+        confirm_seconds=6.0,
+        hop_seconds=2.0,
+    )
+    assert hit is not None
+    gap_start, gap_end, new_off, _score = hit
+    assert gap_start == pytest.approx(40.0, abs=1.0)
+    assert gap_end == pytest.approx(60.0, abs=2.0)
+    assert new_off == pytest.approx(20.0, abs=1.0)
+    assert (gap_end - gap_start) < 35.0  # must not latch the +48 alias
 
 
 def test_curve_walk_prefers_long_surplus_over_short_false_peak() -> None:
