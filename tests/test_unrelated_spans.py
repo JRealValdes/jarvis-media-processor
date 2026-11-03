@@ -382,7 +382,8 @@ def test_missing_base_extra_scene_detected() -> None:
 def test_missing_gap_credible_picture_vs_activity() -> None:
     """Picture-backed resumes reject short islands; activity-only is looser."""
     assert _missing_gap_credible(10.0, 0.95, picture_backed=True) is False
-    assert _missing_gap_credible(18.0, 0.70, picture_backed=True) is True
+    assert _missing_gap_credible(18.0, 0.95, picture_backed=True) is False
+    assert _missing_gap_credible(22.0, 0.70, picture_backed=True) is True
     assert _missing_gap_credible(22.0, 0.60, picture_backed=True) is False
     assert _missing_gap_credible(32.0, 0.50, picture_backed=True) is True
     assert _missing_gap_credible(10.0, 0.70, picture_backed=False) is True
@@ -486,30 +487,56 @@ def test_find_forward_missing_accepts_framed_long_gap() -> None:
 
 
 def test_find_forward_missing_rejects_short_framed_island() -> None:
-    """Brief framed agreements (<15s) are treated as jitter, not missing-base."""
+    """Brief framed agreements (<20s) are treated as jitter, not missing-base."""
     base, donor = _shared_then_base_gap(gap=32)
 
-    def frames_ok(base_t: float, donor_t: float) -> bool:
+    def frames_ok_short(base_t: float, donor_t: float) -> bool:
         # Agree only on a short 8s jump — classic cross-encode alias.
         return abs(base_t - 46.0) <= 1.0 and abs(donor_t - 38.0) <= 4.0
 
-    hit = _find_forward_missing(
-        base,
-        donor,
-        break_base=38.0,
-        break_donor=38.0,
-        speed=1.0,
-        offset=0.0,
-        half_window=5.0,
-        period=1.0,
-        min_score=0.25,
-        min_missing_seconds=6.0,
-        max_ahead=80.0,
-        confirm_seconds=3.0,
-        hop_seconds=1.0,
-        frame_confirm=frames_ok,
+    assert (
+        _find_forward_missing(
+            base,
+            donor,
+            break_base=38.0,
+            break_donor=38.0,
+            speed=1.0,
+            offset=0.0,
+            half_window=5.0,
+            period=1.0,
+            min_score=0.25,
+            min_missing_seconds=6.0,
+            max_ahead=80.0,
+            confirm_seconds=3.0,
+            hop_seconds=1.0,
+            frame_confirm=frames_ok_short,
+        )
+        is None
     )
-    assert hit is None
+
+    def frames_ok_fifteen(base_t: float, donor_t: float) -> bool:
+        # 15s framed resume — previously accepted; now below the 20s floor.
+        return abs(base_t - 53.0) <= 1.0 and abs(donor_t - 38.0) <= 4.0
+
+    assert (
+        _find_forward_missing(
+            base,
+            donor,
+            break_base=38.0,
+            break_donor=38.0,
+            speed=1.0,
+            offset=0.0,
+            half_window=5.0,
+            period=1.0,
+            min_score=0.25,
+            min_missing_seconds=6.0,
+            max_ahead=80.0,
+            confirm_seconds=3.0,
+            hop_seconds=1.0,
+            frame_confirm=frames_ok_fifteen,
+        )
+        is None
+    )
 
 
 def test_filter_pairs_excluding_donor() -> None:
