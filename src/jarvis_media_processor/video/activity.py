@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image
 from scipy.signal import find_peaks
 
 from jarvis_media_processor.video.hashing import phash_distance
 from jarvis_media_processor.video.models import SampledFrame
+from jarvis_media_processor.video.preprocess import structure_change, structure_map
 
 # pHash with hash_size=8 yields 64 bits.
 _DEFAULT_MAX_DISTANCE = 64
+_DEFAULT_STRUCTURE_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -28,6 +33,14 @@ class ActivityEnvelope:
             raise ValueError("times and values must have the same length")
 
 
+def _sample_period(times: NDArray[np.float64]) -> float:
+    if times.size >= 2:
+        period = float(np.median(np.diff(times)))
+    else:
+        period = 1.0
+    return period if period > 0 else 1.0
+
+
 def build_activity_envelope(
     frames: list[SampledFrame],
     *,
@@ -37,6 +50,9 @@ def build_activity_envelope(
 
     ``v[0] = 0``; ``v[i] = distance(frame[i-1], frame[i]) / max_hash_distance``.
     Larger values mean abrupt visual change (shot cuts, big motion).
+
+    Prefer :func:`build_structural_activity_envelope` for cross-encode curve
+    walking; this pHash-diff signal remains as baseline / fallback.
     """
     if not frames:
         return ActivityEnvelope(
@@ -50,13 +66,109 @@ def build_activity_envelope(
     denom = float(max(max_hash_distance, 1))
     for i in range(1, len(ordered)):
         values[i] = phash_distance(ordered[i - 1].phash, ordered[i].phash) / denom
-    if len(times) >= 2:
-        period = float(np.median(np.diff(times)))
-    else:
-        period = 1.0
-    if period <= 0:
-        period = 1.0
-    return ActivityEnvelope(times=times, values=values, sample_period=period)
+    return ActivityEnvelope(times=times, values=values, sample_period=_sample_period(times))
+
+
+def build_structural_activity_envelope(
+    frames: Sequence[SampledFrame] | Sequence[Path] | Sequence[Image.Image],
+    *,
+    times: Sequence[float] | None = None,
+    target_size: int = _DEFAULT_STRUCTURE_SIZE,
+    crop_bars: bool = True,
+) -> ActivityEnvelope:
+    """Build ``v(t)`` from consecutive structural-map change (encode-robust).
+
+    Accepts ``SampledFrame`` (reads ``path``), image paths, or open PIL images.
+    When passing bare images/paths, provide ``times`` (defaults to ``0..n-1``).
+    """
+    maps, sample_times = _load_structure_series(
+        frames, times=times, target_size=target_size, crop_bars=crop_bars
+    )
+    if not sample_times:
+        return ActivityEnvelope(
+            times=np.zeros(0, dtype=np.float64),
+            values=np.zeros(0, dtype=np.float64),
+            sample_period=1.0,
+        )
+    times_arr = np.asarray(sample_times, dtype=np.float64)
+    values = np.zeros(len(maps), dtype=np.float64)
+    for i in range(1, len(maps)):
+        values[i] = structure_change(maps[i - 1], maps[i])
+    return ActivityEnvelope(
+        times=times_arr, values=values, sample_period=_sample_period(times_arr)
+    )
+
+
+def _load_structure_series(
+    frames: Sequence[SampledFrame] | Sequence[Path] | Sequence[Image.Image],
+    *,
+    times: Sequence[float] | None,
+    target_size: int,
+    crop_bars: bool,
+) -> tuple[list[NDArray[np.float64]], list[float]]:
+    if not frames:
+        return [], []
+    first = frames[0]
+    maps: list[NDArray[np.float64]] = []
+    sample_times: list[float] = []
+
+    if isinstance(first, SampledFrame):
+        sampled = [f for f in frames if isinstance(f, SampledFrame)]
+        ordered = sorted(sampled, key=lambda f: f.time_seconds)
+        for item in ordered:
+            with Image.open(item.path) as img:
+                maps.append(
+                    structure_map(img, target_size=target_size, crop_bars=crop_bars)
+                )
+            sample_times.append(float(item.time_seconds))
+        return maps, sample_times
+
+    if times is not None and len(times) != len(frames):
+        raise ValueError("times must match the number of frames")
+
+    for index, item in enumerate(frames):
+        if isinstance(item, Image.Image):
+            maps.append(structure_map(item, target_size=target_size, crop_bars=crop_bars))
+        else:
+            path = Path(item)
+            with Image.open(path) as img:
+                maps.append(
+                    structure_map(img, target_size=target_size, crop_bars=crop_bars)
+                )
+        sample_times.append(float(times[index]) if times is not None else float(index))
+    return maps, sample_times
+
+
+def aligned_activity_correlation(
+    base: ActivityEnvelope,
+    donor: ActivityEnvelope,
+    *,
+    speed: float = 1.0,
+    offset_seconds: float = 0.0,
+    base_start: float | None = None,
+    base_end: float | None = None,
+    period: float | None = None,
+) -> float:
+    """Pearson-like correlation of activity shapes under ``donor ≈ speed*base+offset``.
+
+    Used to compare pHash-diff vs structural envelopes on known-aligned spans
+    without involving the curve-walk ranker.
+    """
+    if base.times.size < 4 or donor.times.size < 4:
+        return 0.0
+    step = float(period or np.median([base.sample_period, donor.sample_period]) or 1.0)
+    lo = float(base.times[0] if base_start is None else base_start)
+    hi = float(base.times[-1] if base_end is None else base_end)
+    if hi - lo < 4 * step:
+        return 0.0
+    grid = np.arange(lo, hi + step * 0.5, step, dtype=np.float64)
+    base_vals = np.interp(grid, base.times, base.values, left=0.0, right=0.0)
+    donor_grid = speed * grid + offset_seconds
+    donor_vals = np.interp(donor_grid, donor.times, donor.values, left=0.0, right=0.0)
+    a = normalize_activity(base_vals)
+    b = normalize_activity(donor_vals)
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)
+    return max(0.0, min(1.0, float(np.dot(a, b) / denom)))
 
 
 def normalize_activity(values: NDArray[np.floating]) -> NDArray[np.float64]:

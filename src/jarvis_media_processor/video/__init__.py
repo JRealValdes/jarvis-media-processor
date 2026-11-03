@@ -3,7 +3,9 @@
 from jarvis_media_processor.video.activity import (
     ActivityEnvelope,
     activity_peak_times,
+    aligned_activity_correlation,
     build_activity_envelope,
+    build_structural_activity_envelope,
 )
 from jarvis_media_processor.video.analyze import match_media_visuals
 from jarvis_media_processor.video.confirm import (
@@ -24,7 +26,12 @@ from jarvis_media_processor.video.hashing import (
 )
 from jarvis_media_processor.video.match import match_frames, match_frames_two_phase
 from jarvis_media_processor.video.models import FrameCorrespondence, SampledFrame, VisualMatchReport
-from jarvis_media_processor.video.preprocess import crop_letterbox, normalize_frame
+from jarvis_media_processor.video.preprocess import (
+    crop_letterbox,
+    normalize_frame,
+    structure_change,
+    structure_map,
+)
 from jarvis_media_processor.video.shots import detect_shot_boundaries, shot_boundary_times
 
 __all__ = [
@@ -34,8 +41,10 @@ __all__ = [
     "SampledFrame",
     "VisualMatchReport",
     "activity_peak_times",
+    "aligned_activity_correlation",
     "build_activity_envelope",
     "build_frame_extract_command",
+    "build_structural_activity_envelope",
     "compute_phash",
     "crop_letterbox",
     "detect_shot_boundaries",
@@ -51,4 +60,6 @@ __all__ = [
     "normalize_frame",
     "phash_distance",
     "shot_boundary_times",
+    "structure_change",
+    "structure_map",
 ]
