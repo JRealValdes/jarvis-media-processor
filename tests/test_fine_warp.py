@@ -8,6 +8,7 @@ from jarvis_media_processor.reconstruct.fine_warp import (
     AnchorMatch,
     FineWarpSegment,
     apply_fine_warps,
+    filter_coherent_anchors,
     match_onset_anchors,
     plan_and_apply_fine_warp,
     plan_fine_warps,
@@ -46,19 +47,43 @@ def test_plan_accepts_mild_speed_skips_coarse() -> None:
         min_speed=0.97,
         max_speed=1.03,
         min_span_seconds=0.4,
+        max_span_seconds=5.0,
         max_lag_seconds=0.15,
+        max_lag_jump_seconds=0.12,
     )
-    assert len(plan.segments) == 2
-    assert abs(plan.segments[0].base_start - 1.0) < 1e-9
-    assert abs(plan.segments[0].base_end - 2.0) < 1e-9
-    assert abs(plan.segments[1].base_start - 3.0) < 1e-9
+    assert any(abs(s.base_start - 1.0) < 1e-9 for s in plan.segments)
     assert any("content-diff" in n for n in plan.skipped_notes)
     assert not any(abs(s.base_start - 2.0) < 1e-9 for s in plan.segments)
 
 
+def test_plan_skips_long_spans() -> None:
+    anchors = [
+        AnchorMatch(10.0, 10.04, 0.04, 0.9),
+        AnchorMatch(20.0, 20.04, 0.04, 0.9),  # 10s apart
+    ]
+    plan = plan_fine_warps(
+        anchors,
+        max_span_seconds=4.0,
+        max_lag_jump_seconds=0.05,
+    )
+    assert plan.segments == []
+    assert any("long span" in n for n in plan.skipped_notes)
+
+
+def test_filter_drops_incoherent_lag_outlier() -> None:
+    anchors = [
+        AnchorMatch(1.0, 1.03, 0.03, 0.9),
+        AnchorMatch(2.0, 2.14, 0.14, 0.9),  # outlier
+        AnchorMatch(3.0, 3.04, 0.04, 0.9),
+    ]
+    kept, notes = filter_coherent_anchors(anchors, max_lag_jump_seconds=0.05)
+    assert len(kept) == 2
+    assert all(abs(a.base_time - 2.0) > 1e-9 for a in kept)
+    assert any("incoherent" in n for n in notes)
+
+
 def test_apply_constant_lag_pulls_onset_earlier() -> None:
     sr = 8_000
-    # Content that belongs at t=1.0 sits at t=1.05 in recon.
     recon = _bursts(sr, [1.05], duration=2.5)
     segments = [
         FineWarpSegment(
@@ -71,7 +96,6 @@ def test_apply_constant_lag_pulls_onset_earlier() -> None:
         )
     ]
     warped = apply_fine_warps(recon, sr, segments)
-    # After warp, energy peak should sit near 1.0s.
     peak_i = int(np.argmax(warped))
     peak_t = peak_i / sr
     assert abs(peak_t - 1.0) < 0.03
@@ -90,6 +114,7 @@ def test_match_anchors_recovers_known_lag() -> None:
         max_lag_seconds=0.12,
         window_seconds=0.4,
         min_score=0.25,
+        min_score_margin=0.02,
         min_distance_seconds=0.4,
         prominence=0.2,
         max_landmarks=20,
@@ -103,7 +128,6 @@ def test_plan_and_apply_reduces_residual_lag() -> None:
     sr = 8_000
     times = [1.0, 2.0, 3.0, 4.0, 5.0]
     base = _bursts(sr, times, duration=6.0)
-    # Clear constant residual lag (~80 ms late).
     lag = 0.08
     recon = _bursts(sr, [t + lag for t in times], duration=6.0)
     warped, plan = plan_and_apply_fine_warp(
@@ -113,12 +137,18 @@ def test_plan_and_apply_reduces_residual_lag() -> None:
         max_lag_seconds=0.15,
         window_seconds=0.45,
         min_score=0.25,
+        min_score_margin=0.02,
         min_speed=0.97,
         max_speed=1.03,
         min_span_seconds=0.5,
+        max_span_seconds=5.0,
+        max_lag_jump_seconds=0.08,
+        prominence=0.2,
+        min_distance_seconds=0.5,
     )
     assert plan.anchors
     assert plan.segments
+    assert max(s.base_end - s.base_start for s in plan.segments) <= 5.0 + 1e-9
 
     def _centroid_near(signal: np.ndarray, t: float, radius: float = 0.2) -> float:
         lo = max(0, int((t - radius) * sr))

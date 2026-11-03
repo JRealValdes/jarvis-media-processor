@@ -188,16 +188,31 @@ class Settings(BaseSettings):
 
     # Post-reconstruct piecewise fine-warp (base track 0 vs reconstructed WAV)
     fine_warp_max_lag_seconds: float = Field(
-        default=0.15,
+        default=0.12,
         description="Maximum |lag| when pairing onset anchors for fine-warp.",
     )
     fine_warp_window_seconds: float = Field(
-        default=0.5,
+        default=0.45,
         description="Envelope window around each onset when estimating local lag.",
     )
     fine_warp_min_score: float = Field(
-        default=0.35,
+        default=0.55,
         description="Minimum local envelope correlation to accept an onset anchor.",
+    )
+    fine_warp_min_score_margin: float = Field(
+        default=0.08,
+        description=(
+            "Best lag must beat lag=0 correlation by at least this margin "
+            "(rejects ambiguous dialogue matches)."
+        ),
+    )
+    fine_warp_prominence: float = Field(
+        default=0.28,
+        description="Minimum normalized envelope prominence for base onset landmarks.",
+    )
+    fine_warp_min_distance_seconds: float = Field(
+        default=0.75,
+        description="Minimum spacing between candidate onset landmarks.",
     )
     fine_warp_min_speed: float = Field(
         default=0.97,
@@ -210,6 +225,16 @@ class Settings(BaseSettings):
     fine_warp_min_span_seconds: float = Field(
         default=0.4,
         description="Ignore fine-warp spans shorter than this.",
+    )
+    fine_warp_max_span_seconds: float = Field(
+        default=4.0,
+        description=(
+            "Never warp spans longer than this (avoids multi-minute rubber-banding)."
+        ),
+    )
+    fine_warp_max_lag_jump_seconds: float = Field(
+        default=0.05,
+        description="Drop anchors / spans whose lag jumps more than this vs neighbors.",
     )
 
     # Processing report / manual-review thresholds

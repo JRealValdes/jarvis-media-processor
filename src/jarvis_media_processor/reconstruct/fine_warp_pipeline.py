@@ -124,9 +124,14 @@ def fine_warp_reconstructed_audio(
         max_lag_seconds=cfg.fine_warp_max_lag_seconds,
         window_seconds=cfg.fine_warp_window_seconds,
         min_score=cfg.fine_warp_min_score,
+        min_score_margin=cfg.fine_warp_min_score_margin,
         min_speed=cfg.fine_warp_min_speed,
         max_speed=cfg.fine_warp_max_speed,
         min_span_seconds=cfg.fine_warp_min_span_seconds,
+        max_span_seconds=cfg.fine_warp_max_span_seconds,
+        max_lag_jump_seconds=cfg.fine_warp_max_lag_jump_seconds,
+        prominence=cfg.fine_warp_prominence,
+        min_distance_seconds=cfg.fine_warp_min_distance_seconds,
     )
 
     out_wav = work / output_name

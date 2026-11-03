@@ -1,7 +1,8 @@
 """Piecewise fine audio warp: reconstructed donor vs base track 0.
 
 After coarse reconstruct, residual lag (tens of ms) can remain. This pass
-matches energy onsets and applies only mild local warps — no surplus/missing.
+matches strong energy onsets and applies only short, mild local warps.
+Uncertain matches are skipped — never stretched across long spans.
 """
 
 from __future__ import annotations
@@ -57,26 +58,27 @@ def _local_lag(
     center_seconds: float,
     window_seconds: float,
     max_lag_seconds: float,
-) -> tuple[float, float]:
-    """Return ``(best_lag, score)`` via normalized envelope cross-correlation.
+) -> tuple[float, float, float]:
+    """Return ``(best_lag, best_score, zero_lag_score)``.
 
     ``lag`` is recon_time − base_time at the best match (positive ⇒ recon late).
     """
     if hop <= 0 or base_env.size < 4 or recon_env.size < 4:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     half_w = max(1, int(round((window_seconds * 0.5) / hop)))
     center_i = int(round(center_seconds / hop))
     b0 = max(0, center_i - half_w)
     b1 = min(int(base_env.size), center_i + half_w + 1)
     if b1 - b0 < 4:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     template = normalize_activity(np.asarray(base_env[b0:b1], dtype=np.float64))
     if float(np.max(np.abs(template))) < 1e-12:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
     max_lag_hops = max(1, int(round(max_lag_seconds / hop)))
     best_lag = 0.0
     best_score = -1.0
+    zero_score = -1.0
     for lag_h in range(-max_lag_hops, max_lag_hops + 1):
         r_center = center_i + lag_h
         r0 = r_center - half_w
@@ -88,12 +90,17 @@ def _local_lag(
             continue
         # Both sides are z-scored → mean product ≈ Pearson correlation.
         score = float(np.mean(template * cand))
+        if lag_h == 0:
+            zero_score = score
         if score > best_score:
             best_score = score
             best_lag = lag_h * hop
     if best_score < 0:
-        return 0.0, 0.0
-    return best_lag, best_score
+        return 0.0, 0.0, 0.0
+    if zero_score < 0:
+        # Zero lag was out of bounds (shouldn't happen mid-timeline).
+        zero_score = 0.0
+    return best_lag, best_score, zero_score
 
 
 def match_onset_anchors(
@@ -101,16 +108,21 @@ def match_onset_anchors(
     recon_samples: NDArray[np.floating],
     sample_rate: int,
     *,
-    max_lag_seconds: float = 0.15,
-    window_seconds: float = 0.5,
-    min_score: float = 0.35,
+    max_lag_seconds: float = 0.12,
+    window_seconds: float = 0.45,
+    min_score: float = 0.55,
+    min_score_margin: float = 0.08,
     hop_seconds: float = 0.01,
     frame_seconds: float = 0.04,
-    min_distance_seconds: float = 0.35,
-    prominence: float = 0.12,
-    max_landmarks: int = 400,
+    min_distance_seconds: float = 0.75,
+    prominence: float = 0.28,
+    max_landmarks: int = 300,
 ) -> list[AnchorMatch]:
-    """Pair base energy landmarks with local lags on the reconstructed track."""
+    """Pair strong base energy landmarks with local lags on the reconstructed track.
+
+    Rejects weak correlations, search-edge saturations, and peaks that do not beat
+    lag=0 by ``min_score_margin`` (avoids picking the wrong nearby dialogue line).
+    """
     base = np.asarray(base_samples, dtype=np.float64).reshape(-1)
     recon = np.asarray(recon_samples, dtype=np.float64).reshape(-1)
     landmarks, _, _ = detect_energy_landmarks(
@@ -128,12 +140,13 @@ def match_onset_anchors(
     recon_env, _ = rms_envelope(
         recon, sample_rate, hop_seconds=hop_seconds, frame_seconds=frame_seconds
     )
-    # Align envelope hops if floating rounding differs slightly.
     hop = float(hop) if hop > 0 else hop_seconds
+    # Treat lags within one hop of the search limit as saturated / untrusted.
+    edge_eps = max(hop * 0.75, 1e-3)
 
     matches: list[AnchorMatch] = []
     for lm in landmarks:
-        lag, score = _local_lag(
+        lag, score, zero_score = _local_lag(
             base_env,
             recon_env,
             hop=hop,
@@ -143,7 +156,9 @@ def match_onset_anchors(
         )
         if score < min_score:
             continue
-        if abs(lag) > max_lag_seconds + 1e-9:
+        if score - zero_score < min_score_margin:
+            continue
+        if abs(lag) > max_lag_seconds - edge_eps:
             continue
         matches.append(
             AnchorMatch(
@@ -157,36 +172,82 @@ def match_onset_anchors(
     return matches
 
 
+def filter_coherent_anchors(
+    anchors: list[AnchorMatch],
+    *,
+    max_lag_jump_seconds: float = 0.05,
+) -> tuple[list[AnchorMatch], list[str]]:
+    """Drop interior lag spikes that disagree with agreeing neighbors.
+
+    Endpoints are kept; pairwise ``max_lag_jump_seconds`` still gates spans.
+    """
+    if len(anchors) < 3:
+        return list(anchors), []
+    kept: list[AnchorMatch] = []
+    notes: list[str] = []
+    for i, anchor in enumerate(anchors):
+        if i == 0 or i + 1 == len(anchors):
+            kept.append(anchor)
+            continue
+        left = anchors[i - 1].lag_seconds
+        right = anchors[i + 1].lag_seconds
+        neighbors_agree = abs(left - right) <= max_lag_jump_seconds
+        spike = (
+            abs(anchor.lag_seconds - left) > max_lag_jump_seconds
+            and abs(anchor.lag_seconds - right) > max_lag_jump_seconds
+        )
+        if neighbors_agree and spike:
+            notes.append(
+                f"Drop incoherent anchor at {anchor.base_time:.2f}s "
+                f"(lag={anchor.lag_seconds:+.3f}s vs neighbors "
+                f"{left:+.3f}/{right:+.3f}s)."
+            )
+            continue
+        kept.append(anchor)
+    return kept, notes
+
+
 def plan_fine_warps(
     anchors: list[AnchorMatch],
     *,
     min_speed: float = 0.97,
     max_speed: float = 1.03,
     min_span_seconds: float = 0.4,
-    max_lag_seconds: float = 0.15,
+    max_span_seconds: float = 4.0,
+    max_lag_seconds: float = 0.12,
+    max_lag_jump_seconds: float = 0.05,
 ) -> FineWarpPlan:
-    """Turn consecutive fine anchors into mild stretch/compress segments.
+    """Turn nearby coherent anchors into short mild stretch/compress segments.
 
-    Consecutive anchors whose implied speed falls outside ``[min_speed, max_speed]``
-    are skipped (content difference / coarse mismatch) rather than forced.
+    Spans longer than ``max_span_seconds`` are never warped (avoids multi-minute
+    rubber-banding from a pair of dubious endpoints).
     """
-    plan = FineWarpPlan(anchors=list(anchors))
-    if len(anchors) < 2:
-        if anchors:
+    coherent, drop_notes = filter_coherent_anchors(
+        anchors, max_lag_jump_seconds=max_lag_jump_seconds
+    )
+    plan = FineWarpPlan(anchors=list(coherent), skipped_notes=list(drop_notes))
+    if len(coherent) < 2:
+        if coherent:
             plan.skipped_notes.append(
-                "Fewer than 2 onset anchors; no piecewise fine-warp segments."
+                "Fewer than 2 coherent onset anchors; no piecewise fine-warp segments."
             )
         else:
-            plan.skipped_notes.append("No onset anchors matched for fine-warp.")
+            plan.skipped_notes.append("No coherent onset anchors for fine-warp.")
         return plan
 
-    for left, right in zip(anchors, anchors[1:], strict=False):
+    for left, right in zip(coherent, coherent[1:], strict=False):
         base_span = right.base_time - left.base_time
         recon_span = right.recon_time - left.recon_time
         if base_span < min_span_seconds:
             plan.skipped_notes.append(
                 f"Skip short span {left.base_time:.2f}–{right.base_time:.2f}s "
                 f"(<{min_span_seconds:.2f}s)."
+            )
+            continue
+        if base_span > max_span_seconds:
+            plan.skipped_notes.append(
+                f"Skip long span {left.base_time:.2f}–{right.base_time:.2f}s "
+                f"(>{max_span_seconds:.2f}s; refuse multi-minute rubber-band)."
             )
             continue
         if recon_span <= 1e-6:
@@ -207,6 +268,12 @@ def plan_fine_warps(
                 f"(right lag {right.lag_seconds:+.3f}s exceeds ±{max_lag_seconds:.3f}s)."
             )
             continue
+        if abs(right.lag_seconds - left.lag_seconds) > max_lag_jump_seconds + 1e-9:
+            plan.skipped_notes.append(
+                f"Skip lag-jump span {left.base_time:.2f}–{right.base_time:.2f}s "
+                f"(Δlag={right.lag_seconds - left.lag_seconds:+.3f}s)."
+            )
+            continue
         speed = recon_span / base_span
         if speed < min_speed or speed > max_speed:
             plan.skipped_notes.append(
@@ -215,7 +282,11 @@ def plan_fine_warps(
             )
             continue
         # Near-identity: skip to avoid needless resampling noise.
-        if abs(speed - 1.0) < 1e-4 and abs(left.lag_seconds) < 1e-4 and abs(right.lag_seconds) < 1e-4:
+        if (
+            abs(speed - 1.0) < 1e-4
+            and abs(left.lag_seconds) < 1e-4
+            and abs(right.lag_seconds) < 1e-4
+        ):
             continue
         plan.segments.append(
             FineWarpSegment(
@@ -265,7 +336,9 @@ def apply_fine_warps(
             continue
         base_span = max(1e-9, seg.base_end - seg.base_start)
         # Linear map base_time → recon_time within the segment.
-        t_frac = (np.arange(start_i, end_i, dtype=np.float64) / sample_rate - seg.base_start) / base_span
+        t_frac = (
+            np.arange(start_i, end_i, dtype=np.float64) / sample_rate - seg.base_start
+        ) / base_span
         t_frac = np.clip(t_frac, 0.0, 1.0)
         recon_t = seg.recon_start + t_frac * (seg.recon_end - seg.recon_start)
         src_index[start_i:end_i] = recon_t * sample_rate
@@ -291,22 +364,25 @@ def plan_and_apply_fine_warp(
     recon_samples: NDArray[np.floating],
     sample_rate: int,
     *,
-    max_lag_seconds: float = 0.15,
-    window_seconds: float = 0.5,
-    min_score: float = 0.35,
+    max_lag_seconds: float = 0.12,
+    window_seconds: float = 0.45,
+    min_score: float = 0.55,
+    min_score_margin: float = 0.08,
     min_speed: float = 0.97,
     max_speed: float = 1.03,
     min_span_seconds: float = 0.4,
+    max_span_seconds: float = 4.0,
+    max_lag_jump_seconds: float = 0.05,
+    prominence: float = 0.28,
+    min_distance_seconds: float = 0.75,
 ) -> tuple[NDArray[np.floating], FineWarpPlan]:
-    """Match onsets, plan mild warps, and return warped reconstructed audio."""
-    # Planning always uses mono mixes.
+    """Match strong onsets, plan short mild warps, and return warped audio."""
     base_mono = np.asarray(base_samples, dtype=np.float64)
     if base_mono.ndim == 2:
         base_mono = base_mono.mean(axis=0)
     recon_arr = np.asarray(recon_samples, dtype=np.float64)
     recon_mono = recon_arr.mean(axis=0) if recon_arr.ndim == 2 else recon_arr
 
-    # Trim to shared length for fair comparison.
     n = min(base_mono.size, recon_mono.size)
     base_mono = base_mono[:n]
     if recon_arr.ndim == 2:
@@ -323,13 +399,18 @@ def plan_and_apply_fine_warp(
         max_lag_seconds=max_lag_seconds,
         window_seconds=window_seconds,
         min_score=min_score,
+        min_score_margin=min_score_margin,
+        prominence=prominence,
+        min_distance_seconds=min_distance_seconds,
     )
     plan = plan_fine_warps(
         anchors,
         min_speed=min_speed,
         max_speed=max_speed,
         min_span_seconds=min_span_seconds,
+        max_span_seconds=max_span_seconds,
         max_lag_seconds=max_lag_seconds,
+        max_lag_jump_seconds=max_lag_jump_seconds,
     )
     warped = apply_fine_warps(recon_work, sample_rate, plan.segments)
     return warped, plan
