@@ -133,6 +133,21 @@ uv run jmp job list
 uv run jmp job cancel <job-id>
 ```
 
+### Batch / folder workflows
+
+Discover and enqueue many base/donor pairs from a folder layout (completed work skipped by default; failed pairs need `--retry`):
+
+```bash
+uv run jmp batch discover path/to/incoming -o path/to/outgoing
+uv run jmp batch run path/to/incoming -o path/to/outgoing
+uv run jmp batch run path/to/incoming -o path/to/outgoing --dry-run
+uv run jmp batch run path/to/incoming -o path/to/outgoing --retry
+uv run jmp batch status <batch-id>
+uv run jmp batch list
+```
+
+Pairing layouts, roots, and skip/retry rules: [docs/batch-workflows.md](docs/batch-workflows.md).
+
 ### Mux
 
 Stream-copy base A/V and attach the reconstructed (or fine-warped) donor audio as an extra track:
@@ -167,6 +182,8 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 |----------|---------|---------|
 | `JMP_LOG_LEVEL` | `INFO` | Logging level |
 | `JMP_WORK_DIR` | `.jmp` | Temp / job workspace root |
+| `JMP_BATCH_INPUT_DIR` | (unset) | Default batch input root |
+| `JMP_BATCH_OUTPUT_DIR` | (unset) | Default batch output root |
 | `JMP_FFMPEG_PATH` | `ffmpeg` | FFmpeg executable |
 | `JMP_FFPROBE_PATH` | `ffprobe` | FFprobe executable |
 | `JMP_FINE_WARP_*` | (see Settings) | Dense residual lag field after reconstruct — [docs/fine-warp.md](docs/fine-warp.md) |
@@ -184,7 +201,8 @@ src/jarvis_media_processor/
   reconstruct/   # Donor on base timeline + fine-warp
   output/        # MKV mux
   report/        # Processing reports / validation
-  jobs/          # Job runner (planned)
+  jobs/          # Standalone job runner + store
+  batch/         # Folder pairing + batch enqueue
   api/           # HTTP API (planned)
 ```
 

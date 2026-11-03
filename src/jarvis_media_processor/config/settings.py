@@ -32,6 +32,28 @@ class Settings(BaseSettings):
             "job workspace (JSON reports/plans are kept). Failure keeps everything."
         ),
     )
+    batch_input_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Default input root for folder-based batch discovery "
+            "(``jmp batch``). Override with a CLI path."
+        ),
+    )
+    batch_output_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Default output root for deterministic batch outputs "
+            "(``jmp batch -o``). Sources are never written here as inputs."
+        ),
+    )
+    batch_temp_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Optional temp root for batch runs. When set, job and batch JSON live "
+            "under this directory (``jobs/``, ``batches/``) instead of "
+            "``JMP_WORK_DIR``."
+        ),
+    )
     ffmpeg_path: str = Field(
         default="ffmpeg",
         description="FFmpeg executable name or path (must be on PATH unless absolute).",
