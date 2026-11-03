@@ -5,6 +5,7 @@ from jarvis_media_processor.video.activity import (
     activity_peak_times,
     aligned_activity_correlation,
     build_activity_envelope,
+    build_fused_activity_envelope,
     build_structural_activity_envelope,
 )
 from jarvis_media_processor.video.analyze import match_media_visuals
@@ -44,6 +45,7 @@ __all__ = [
     "aligned_activity_correlation",
     "build_activity_envelope",
     "build_frame_extract_command",
+    "build_fused_activity_envelope",
     "build_structural_activity_envelope",
     "compute_phash",
     "crop_letterbox",

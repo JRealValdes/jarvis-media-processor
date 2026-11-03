@@ -53,7 +53,10 @@ class VisualMatchReport(BaseModel):
     )
     base_activity_values: list[float] = Field(
         default_factory=list,
-        description="Normalized consecutive-frame variation on the base timeline.",
+        description=(
+            "Fused consecutive-frame activity on the base timeline "
+            "(max of normalized pHash-diff and weighted structural change)."
+        ),
     )
     donor_activity_times: list[float] = Field(
         default_factory=list,
@@ -61,6 +64,9 @@ class VisualMatchReport(BaseModel):
     )
     donor_activity_values: list[float] = Field(
         default_factory=list,
-        description="Normalized consecutive-frame variation on the donor timeline.",
+        description=(
+            "Fused consecutive-frame activity on the donor timeline "
+            "(max of normalized pHash-diff and weighted structural change)."
+        ),
     )
     params: dict[str, float | int | str] = Field(default_factory=dict)

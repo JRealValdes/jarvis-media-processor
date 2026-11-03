@@ -51,8 +51,8 @@ def build_activity_envelope(
     ``v[0] = 0``; ``v[i] = distance(frame[i-1], frame[i]) / max_hash_distance``.
     Larger values mean abrupt visual change (shot cuts, big motion).
 
-    Prefer :func:`build_structural_activity_envelope` for cross-encode curve
-    walking; this pHash-diff signal remains as baseline / fallback.
+    Prefer :func:`build_fused_activity_envelope` for production curve walking;
+    pure pHash-diff remains as baseline / benchmark component.
     """
     if not frames:
         return ActivityEnvelope(
@@ -96,6 +96,39 @@ def build_structural_activity_envelope(
         values[i] = structure_change(maps[i - 1], maps[i])
     return ActivityEnvelope(
         times=times_arr, values=values, sample_period=_sample_period(times_arr)
+    )
+
+
+def build_fused_activity_envelope(
+    frames: list[SampledFrame],
+    *,
+    structural_weight: float = 0.5,
+    max_hash_distance: int = _DEFAULT_MAX_DISTANCE,
+    target_size: int = _DEFAULT_STRUCTURE_SIZE,
+    crop_bars: bool = True,
+) -> ActivityEnvelope:
+    """Fuse pHash-diff and structural activity for production curve walking.
+
+    Each series is scaled to its own peak, then combined as
+    ``max(phash_norm, structural_weight * structural_norm)``. Pure structural
+    curves improve cross-encode shape match but can alias through flat black
+    ads; keeping a pHash floor preserves sharp encode-local cuts while the
+    structural term still lifts shared edge-change landmarks.
+    """
+    phash = build_activity_envelope(frames, max_hash_distance=max_hash_distance)
+    structural = build_structural_activity_envelope(
+        frames, target_size=target_size, crop_bars=crop_bars
+    )
+    if phash.values.size == 0:
+        return phash
+    ph_peak = float(np.max(phash.values)) + 1e-12
+    st_peak = float(np.max(structural.values)) + 1e-12
+    weight = max(0.0, float(structural_weight))
+    fused = np.maximum(phash.values / ph_peak, weight * (structural.values / st_peak))
+    return ActivityEnvelope(
+        times=phash.times,
+        values=fused.astype(np.float64, copy=False),
+        sample_period=phash.sample_period,
     )
 
 

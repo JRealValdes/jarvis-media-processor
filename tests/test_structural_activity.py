@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw
 from jarvis_media_processor.video.activity import (
     aligned_activity_correlation,
     build_activity_envelope,
+    build_fused_activity_envelope,
     build_structural_activity_envelope,
 )
 from jarvis_media_processor.video.hashing import compute_phash
@@ -109,3 +110,22 @@ def test_structural_beats_phash_under_grade_shift(tmp_path) -> None:
     )
     assert struct_corr >= 0.85
     assert struct_corr >= phash_corr - 0.02
+
+
+def test_fused_activity_keeps_hard_cut_spike(tmp_path) -> None:
+    images = [_stripes(0) for _ in range(5)] + [_solid((200, 30, 30)) for _ in range(5)]
+    frames: list[SampledFrame] = []
+    for i, img in enumerate(images):
+        path = tmp_path / f"f_{i}.png"
+        img.save(path)
+        frames.append(
+            SampledFrame(
+                time_seconds=float(i),
+                path=path,
+                phash=str(compute_phash(img)),
+                role="base",
+            )
+        )
+    fused = build_fused_activity_envelope(frames)
+    assert int(np.argmax(fused.values)) == 5
+    assert float(fused.values[5]) > 0.5

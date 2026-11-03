@@ -14,6 +14,7 @@ from PIL import Image
 from jarvis_media_processor.video.activity import (
     aligned_activity_correlation,
     build_activity_envelope,
+    build_fused_activity_envelope,
     build_structural_activity_envelope,
 )
 from jarvis_media_processor.video.hashing import compute_phash
@@ -44,6 +45,111 @@ def sampled_frames_from_dir(
             )
         )
     return frames
+
+
+def refresh_visual_report_structural(
+    report_path: Path,
+    *,
+    settings: object | None = None,
+) -> Path:
+    """Rewrite a visual match report using fused activity + rematch.
+
+    Reuses existing sampled frame files (no FFmpeg). Updates activity arrays,
+    coarse sync, and two-phase matches so curve-walk smokes see the new signal.
+    """
+    from jarvis_media_processor.config import Settings, get_settings
+    from jarvis_media_processor.video.match import match_frames, match_frames_two_phase
+    from jarvis_media_processor.video.models import VisualMatchReport
+    from jarvis_media_processor.video.shots import shot_boundary_times
+
+    cfg: Settings = settings if isinstance(settings, Settings) else get_settings()
+    report = VisualMatchReport.model_validate_json(
+        report_path.read_text(encoding="utf-8")
+    )
+    base_frames = list(report.base_frames)
+    donor_frames = list(report.donor_frames)
+    if not base_frames or not donor_frames:
+        raise ValueError(f"Report has no frames: {report_path}")
+    for frame in base_frames + donor_frames:
+        if not Path(frame.path).is_file():
+            raise FileNotFoundError(f"Missing frame file: {frame.path}")
+
+    base_shots = shot_boundary_times(
+        base_frames, min_distance=cfg.video_shot_min_distance
+    )
+    donor_shots = shot_boundary_times(
+        donor_frames, min_distance=cfg.video_shot_min_distance
+    )
+    base_activity = build_fused_activity_envelope(base_frames)
+    donor_activity = build_fused_activity_envelope(donor_frames)
+
+    from jarvis_media_processor.alignment.activity_sync import (
+        estimate_speed_offset_activity,
+    )
+
+    coarse = estimate_speed_offset_activity(
+        base_activity,
+        donor_activity,
+        speed_min=cfg.alignment_speed_min,
+        speed_max=cfg.alignment_speed_max,
+    )
+    matches = match_frames_two_phase(
+        base_frames,
+        donor_frames,
+        base_activity,
+        donor_activity,
+        speed=coarse.speed,
+        offset_seconds=coarse.offset_seconds,
+        max_distance=cfg.video_match_max_distance,
+        max_matches_per_base=cfg.video_match_max_per_base,
+        half_window=cfg.alignment_unrelated_window_seconds,
+        min_activity_score=cfg.alignment_unrelated_min_score,
+        donor_search_seconds=min(120.0, cfg.alignment_unrelated_max_surplus_seconds),
+        base_shot_times=base_shots,
+        donor_shot_times=donor_shots,
+    )
+    match_method = "activity_then_frames"
+    if len(matches) < 8:
+        brute = match_frames(
+            base_frames,
+            donor_frames,
+            max_distance=cfg.video_match_max_distance,
+            max_matches_per_base=cfg.video_match_max_per_base,
+            base_shot_times=base_shots,
+            donor_shot_times=donor_shots,
+        )
+        if len(brute) > len(matches):
+            matches = brute
+            match_method = "phash_bruteforce_fallback"
+
+    params = dict(report.params)
+    params.update(
+        {
+            "activity_sample_period": base_activity.sample_period,
+            "activity_method": "fused_max_phash_structural",
+            "activity_structural_weight": 0.5,
+            "match_method": match_method,
+            "activity_sync_speed": coarse.speed,
+            "activity_sync_offset": coarse.offset_seconds,
+            "activity_sync_score": coarse.score,
+            "base_shot_count": len(base_shots),
+            "donor_shot_count": len(donor_shots),
+        }
+    )
+    updated = report.model_copy(
+        update={
+            "matches": matches,
+            "base_shot_times": sorted(base_shots),
+            "donor_shot_times": sorted(donor_shots),
+            "base_activity_times": base_activity.times.tolist(),
+            "base_activity_values": base_activity.values.tolist(),
+            "donor_activity_times": donor_activity.times.tolist(),
+            "donor_activity_values": donor_activity.values.tolist(),
+            "params": params,
+        }
+    )
+    report_path.write_text(updated.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return report_path
 
 
 def compare_envelopes(
@@ -99,14 +205,28 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Smoke scenario dir containing align/visual/{{base,donor}}_frames",
     )
+    parser.add_argument(
+        "--refresh-report",
+        action="store_true",
+        help="Rewrite visual_match_report.json with structural activity + rematch",
+    )
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--offset", type=float, default=0.0)
-    parser.add_argument("--base-start", type=float, required=True)
-    parser.add_argument("--base-end", type=float, required=True)
+    parser.add_argument("--base-start", type=float, default=None)
+    parser.add_argument("--base-end", type=float, default=None)
     parser.add_argument("--fps", type=float, default=1.0)
     args = parser.parse_args(argv)
 
     visual = _resolve_visual_dir(args.smoke_root)
+    if args.refresh_report:
+        report = visual / "visual_match_report.json"
+        refresh_visual_report_structural(report)
+        print(f"refreshed {report}")
+        if args.base_start is None or args.base_end is None:
+            return 0
+
+    if args.base_start is None or args.base_end is None:
+        parser.error("--base-start and --base-end are required unless --refresh-report")
     base_frames = sampled_frames_from_dir(
         visual / "base_frames", role="base", fps=args.fps
     )
