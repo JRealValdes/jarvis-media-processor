@@ -53,6 +53,10 @@ def _lock_for_donor_chunk(
 
     Blind cross-correlation of a mid-timeline donor slice against the full base
     often latches onto a false offset; the curve-walk resume lock is trusted.
+
+    Prefer the lock closest to the chunk start on the donor timeline — that is
+    the post-gap / head resume — not a later speed-refine that may have
+    wandered back toward a pre-gap offset.
     """
     if not locks:
         return None
@@ -62,7 +66,10 @@ def _lock_for_donor_chunk(
         if start - 1e-6 <= lock.donor_time <= end + 1e-6
     ]
     if inside:
-        return max(inside, key=lambda lock: (lock.base_time, lock.score))
+        return min(
+            inside,
+            key=lambda lock: (abs(lock.donor_time - start), -lock.score),
+        )
     mid = 0.5 * (start + end)
     return min(locks, key=lambda lock: abs(lock.donor_time - mid))
 

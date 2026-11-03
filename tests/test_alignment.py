@@ -395,3 +395,66 @@ def test_detect_from_artifacts_uses_visual_first() -> None:
     }
     assert doc.global_offset_seconds is not None
     assert abs(doc.global_offset_seconds - 2.0) < 0.25
+
+
+def test_estimate_prefers_speed_model_over_speed1_approximation() -> None:
+    """A short window must not accept donor≈base-19@1.0 when 0.96 fits better."""
+    # True map: donor = 0.96 * base + 2.5. Over base 480..600 that also looks
+    # roughly like offset -19 at speed 1.0 — offset-first escalation used to win.
+    pairs = [
+        TimePair(float(t), 0.96 * float(t) + 2.5, 0.95, "video_match")
+        for t in range(480, 600, 4)
+    ]
+    doc = estimate_alignment(
+        pairs,
+        base_duration=600.0,
+        donor_duration=630.0,
+        inlier_tolerance=1.5,
+        min_inlier_ratio=0.55,
+        speed_tolerance=0.03,
+    )
+    assert doc.strategy == SyncStrategyLevel.CONSTANT_SPEED
+    assert doc.global_speed is not None
+    assert abs(doc.global_speed - 0.96) < 0.02
+    assert doc.global_offset_seconds is not None
+    assert abs(doc.global_offset_seconds - 2.5) < 1.0
+
+
+def test_lock_for_donor_chunk_prefers_resume_near_chunk_start() -> None:
+    """Later speed-refine locks must not outrank the post-gap resume lock."""
+    from jarvis_media_processor.alignment.curve_walk import CurveLock
+    from jarvis_media_processor.alignment.detect import _lock_for_donor_chunk
+
+    resume = CurveLock(
+        speed=0.92,
+        offset_seconds=20.84,
+        base_time=477.0,
+        donor_time=459.7,
+        score=0.56,
+    )
+    drifted = CurveLock(
+        speed=1.02,
+        offset_seconds=-30.5,
+        base_time=551.0,
+        donor_time=531.5,
+        score=0.78,
+    )
+    picked = _lock_for_donor_chunk([resume, drifted], 459.7, 629.0)
+    assert picked is resume
+
+    head = CurveLock(
+        speed=0.96,
+        offset_seconds=-28.0,
+        base_time=42.0,
+        donor_time=12.0,
+        score=0.4,
+    )
+    late_pre = CurveLock(
+        speed=0.92,
+        offset_seconds=-10.0,
+        base_time=447.0,
+        donor_time=401.0,
+        score=0.71,
+    )
+    picked_pre = _lock_for_donor_chunk([head, late_pre], 0.0, 426.7)
+    assert picked_pre is head

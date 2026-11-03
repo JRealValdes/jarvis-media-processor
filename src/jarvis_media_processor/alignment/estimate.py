@@ -82,8 +82,15 @@ def fit_speed_offset(
         if len(inliers) < 2:
             continue
         rmse = float(np.sqrt(np.mean(residuals[inlier_mask] ** 2)))
-        score = (len(inliers), -abs(speed - 1.0), -rmse)
-        if best is None or score > (len(best.inliers), -abs(best.speed - 1.0), -best.rmse):
+        # Prefer coverage and RMSE over "near 1.0". Biasing toward speed=1
+        # made cross-encode post-ad windows pick 0.98 (then rejected as ≈1)
+        # instead of the true 0.96 map with lower error.
+        score = (len(inliers), -rmse, -abs(speed - 1.0))
+        if best is None or score > (
+            len(best.inliers),
+            -best.rmse,
+            -abs(best.speed - 1.0),
+        ):
             best = FitResult(speed=float(speed), offset=offset, inliers=inliers, rmse=rmse)
     return best
 
@@ -254,7 +261,13 @@ def estimate_alignment(
         )
 
     offset_fit = fit_offset(pairs, inlier_tolerance=inlier_tolerance)
-    if (
+    speed_fit = fit_speed_offset(
+        pairs,
+        inlier_tolerance=inlier_tolerance,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
+    offset_ok = bool(
         offset_fit
         and _accepts(
             offset_fit.inliers,
@@ -268,7 +281,65 @@ def estimate_alignment(
             tolerance=inlier_tolerance,
             min_coverage=min_inlier_ratio,
         )
-    ):
+    )
+    speed_ok = bool(
+        speed_fit
+        and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
+        and abs(speed_fit.speed - 1.0) > speed_tolerance
+        and _monotonic_agrees(
+            pairs,
+            speed=speed_fit.speed,
+            offset=speed_fit.offset,
+            tolerance=inlier_tolerance,
+            min_coverage=min_inlier_ratio,
+        )
+    )
+    # Prefer a non-1.0 speed model when it clearly explains more pairs. A short
+    # post-ad window can look like donor≈base-19 at speed 1.0 while the true
+    # cross-encode map is speed≈0.96 with a different offset; accepting offset
+    # first hid that.
+    prefer_speed = False
+    if offset_ok and speed_ok:
+        assert offset_fit is not None and speed_fit is not None
+        off_n = len(_injective_inliers(offset_fit.inliers))
+        sp_n = len(_injective_inliers(speed_fit.inliers))
+        prefer_speed = sp_n >= off_n + 2 or (
+            sp_n >= off_n and speed_fit.rmse <= offset_fit.rmse * 0.85
+        )
+    elif speed_ok and not offset_ok:
+        prefer_speed = True
+
+    if prefer_speed and speed_fit is not None:
+        conf = _confidence(
+            speed_fit.inliers,
+            base_anchor_count,
+            speed_fit.rmse,
+            inlier_tolerance,
+        )
+        segment = _full_span_segment(
+            speed_fit.inliers,
+            speed=speed_fit.speed,
+            offset=speed_fit.offset,
+            confidence=conf,
+            base_duration=base_duration,
+            donor_duration=donor_duration,
+        )
+        return AlignmentDocument(
+            strategy=SyncStrategyLevel.CONSTANT_SPEED,
+            confidence=conf,
+            global_offset_seconds=speed_fit.offset,
+            global_speed=speed_fit.speed,
+            segments=[segment],
+            notes=[f"Accepted speed={speed_fit.speed:.4f}, offset={speed_fit.offset:.3f}s."],
+            evidence={
+                "pair_count": total,
+                "base_anchors": base_anchor_count,
+                "inliers": len(speed_fit.inliers),
+                "rmse": round(speed_fit.rmse, 4),
+            },
+        )
+
+    if offset_ok and offset_fit is not None:
         conf = _confidence(
             offset_fit.inliers,
             base_anchor_count,
@@ -301,53 +372,6 @@ def estimate_alignment(
                 "base_anchors": base_anchor_count,
                 "inliers": len(offset_fit.inliers),
                 "rmse": round(offset_fit.rmse, 4),
-            },
-        )
-
-    speed_fit = fit_speed_offset(
-        pairs,
-        inlier_tolerance=inlier_tolerance,
-        speed_min=speed_min,
-        speed_max=speed_max,
-    )
-    if (
-        speed_fit
-        and _accepts(speed_fit.inliers, base_anchor_count, min_coverage=min_inlier_ratio)
-        and abs(speed_fit.speed - 1.0) > speed_tolerance
-        and _monotonic_agrees(
-            pairs,
-            speed=speed_fit.speed,
-            offset=speed_fit.offset,
-            tolerance=inlier_tolerance,
-            min_coverage=min_inlier_ratio,
-        )
-    ):
-        conf = _confidence(
-            speed_fit.inliers,
-            base_anchor_count,
-            speed_fit.rmse,
-            inlier_tolerance,
-        )
-        segment = _full_span_segment(
-            speed_fit.inliers,
-            speed=speed_fit.speed,
-            offset=speed_fit.offset,
-            confidence=conf,
-            base_duration=base_duration,
-            donor_duration=donor_duration,
-        )
-        return AlignmentDocument(
-            strategy=SyncStrategyLevel.CONSTANT_SPEED,
-            confidence=conf,
-            global_offset_seconds=speed_fit.offset,
-            global_speed=speed_fit.speed,
-            segments=[segment],
-            notes=[f"Accepted speed={speed_fit.speed:.4f}, offset={speed_fit.offset:.3f}s."],
-            evidence={
-                "pair_count": total,
-                "base_anchors": base_anchor_count,
-                "inliers": len(speed_fit.inliers),
-                "rmse": round(speed_fit.rmse, 4),
             },
         )
 
