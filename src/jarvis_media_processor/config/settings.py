@@ -186,6 +186,32 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Post-reconstruct piecewise fine-warp (base track 0 vs reconstructed WAV)
+    fine_warp_max_lag_seconds: float = Field(
+        default=0.15,
+        description="Maximum |lag| when pairing onset anchors for fine-warp.",
+    )
+    fine_warp_window_seconds: float = Field(
+        default=0.5,
+        description="Envelope window around each onset when estimating local lag.",
+    )
+    fine_warp_min_score: float = Field(
+        default=0.35,
+        description="Minimum local envelope correlation to accept an onset anchor.",
+    )
+    fine_warp_min_speed: float = Field(
+        default=0.97,
+        description="Minimum implied speed between anchors; outside → skip span.",
+    )
+    fine_warp_max_speed: float = Field(
+        default=1.03,
+        description="Maximum implied speed between anchors; outside → skip span.",
+    )
+    fine_warp_min_span_seconds: float = Field(
+        default=0.4,
+        description="Ignore fine-warp spans shorter than this.",
+    )
+
     # Processing report / manual-review thresholds
     report_low_confidence: float = Field(
         default=0.45,
