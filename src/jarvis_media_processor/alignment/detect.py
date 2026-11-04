@@ -16,6 +16,7 @@ from jarvis_media_processor.alignment.activity_sync import (
 from jarvis_media_processor.alignment.curve_walk import CurveLock
 from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
+    ChunkTimingHint,
     estimate_alignment,
     estimate_alignment_visual_first,
 )
@@ -89,6 +90,21 @@ def _envelope_from_report(
     )
 
 
+def _timing_hints_from_locks(locks: list[CurveLock] | None) -> list[ChunkTimingHint]:
+    """Convert curve-walk locks into chunk recovery hints."""
+    if not locks:
+        return []
+    return [
+        ChunkTimingHint(
+            speed=float(lock.speed),
+            offset_seconds=float(lock.offset_seconds),
+            score=float(lock.score),
+            donor_time=float(lock.donor_time),
+        )
+        for lock in locks
+    ]
+
+
 def detect_alignment_from_artifacts(
     base_audio: AudioAnalysisArtifact,
     donor_audio: AudioAnalysisArtifact,
@@ -97,6 +113,7 @@ def detect_alignment_from_artifacts(
     activity_pairs: list[TimePair] | None = None,
     unrelated_donor_intervals: list[TimelineInterval] | None = None,
     missing_base_intervals: list[TimelineInterval] | None = None,
+    walk_locks: list[CurveLock] | None = None,
     base_path: Path | None = None,
     donor_path: Path | None = None,
     inlier_tolerance: float = 0.12,
@@ -142,6 +159,7 @@ def detect_alignment_from_artifacts(
             speed_min=speed_min,
             speed_max=speed_max,
             donor_exclude=excluded or None,
+            timing_hints=_timing_hints_from_locks(walk_locks),
         )
     else:
         doc = estimate_alignment(
@@ -186,6 +204,7 @@ def _activity_pairs_from_report(
     ActivitySyncResult | None,
     list[TimelineInterval],
     list[TimelineInterval],
+    list[CurveLock],
 ]:
     cfg = settings or get_settings()
     period = float(report.params.get("activity_sample_period", 1.0) or 1.0)
@@ -200,7 +219,7 @@ def _activity_pairs_from_report(
         sample_period=period,
     )
     if base_env is None or donor_env is None:
-        return [], None, [], []
+        return [], None, [], [], []
     frame_confirm = None
     if report.base_frames and report.donor_frames:
         frame_confirm = make_frame_confirmer(
@@ -276,7 +295,7 @@ def _activity_pairs_from_report(
         len(missing_base),
         len(chunks),
     )
-    return pairs, sync, unrelated, missing_base
+    return pairs, sync, unrelated, missing_base, list(walk.locks)
 
 
 def detect_alignment(
@@ -312,6 +331,7 @@ def detect_alignment(
     activity_pairs: list[TimePair] = []
     unrelated_donor: list[TimelineInterval] = []
     missing_base: list[TimelineInterval] = []
+    walk_locks: list[CurveLock] = []
     if use_video:
         try:
             report = match_media_visuals(base, donor, work / "visual", settings=cfg)
@@ -321,6 +341,7 @@ def detect_alignment(
                 activity_sync,
                 unrelated_donor,
                 missing_base,
+                walk_locks,
             ) = _activity_pairs_from_report(report, settings=cfg)
             if activity_sync is not None:
                 (work / "activity_sync.json").write_text(
@@ -363,6 +384,7 @@ def detect_alignment(
         activity_pairs=activity_pairs,
         unrelated_donor_intervals=unrelated_donor,
         missing_base_intervals=missing_base,
+        walk_locks=walk_locks,
         base_path=base.resolve(),
         donor_path=donor.resolve(),
         inlier_tolerance=cfg.alignment_inlier_tolerance_seconds,

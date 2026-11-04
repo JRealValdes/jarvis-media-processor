@@ -19,6 +19,7 @@ from jarvis_media_processor.alignment.audio_refine import (
     refine_alignment_audio_offset,
 )
 from jarvis_media_processor.alignment.estimate import (
+    ChunkTimingHint,
     estimate_alignment,
     estimate_alignment_per_donor_chunk,
     estimate_alignment_visual_first,
@@ -44,6 +45,7 @@ __all__ = [
     "AlignmentDocument",
     "AlignmentSegment",
     "AudioOffsetRefinement",
+    "ChunkTimingHint",
     "SyncStrategyLevel",
     "TimelineInterval",
     "activity_time_pairs",

@@ -8,12 +8,14 @@ import pytest
 
 from jarvis_media_processor.alignment import (
     AlignmentDocument,
+    ChunkTimingHint,
     SyncStrategyLevel,
     detect_alignment_from_landmarks,
     estimate_alignment,
     estimate_alignment_per_donor_chunk,
     estimate_alignment_visual_first,
 )
+from jarvis_media_processor.alignment.estimate import fit_speed_offset
 from jarvis_media_processor.alignment.detect import detect_alignment_from_artifacts
 from jarvis_media_processor.alignment.evidence import TimePair, landmark_time_pairs
 from jarvis_media_processor.audio.models import AcousticLandmark, AudioAnalysisArtifact
@@ -354,6 +356,130 @@ def test_visual_first_uses_chunked_fit_when_donor_exclude_set() -> None:
     assert abs(offsets[1] - post_offset) < 0.5
 
 
+def test_failed_chunk_recovers_via_sibling_model() -> None:
+    """A keep-chunk with no global fit borrows the nearest fitted sibling."""
+    post_offset = -3.2
+    post_speed = 0.96
+    # Chunk 0: noisy / contradictory pairs that cannot accept a global model.
+    noisy = [
+        TimePair(float(t), float((t % 17) * 3), 0.9, "video_match")
+        for t in range(10, 160, 8)
+    ]
+    # Chunk 1: clean speed/offset map after an unrelated surplus gap.
+    clean = [
+        TimePair(
+            float(t),
+            post_speed * float(t) + post_offset,
+            0.95,
+            "video_match",
+        )
+        for t in range(220, 520, 8)
+    ]
+    # Bad head lock that must NOT win when a sibling exists.
+    bad_lock = ChunkTimingHint(
+        speed=1.0,
+        offset_seconds=-2.0,
+        score=0.9,
+        donor_time=12.0,
+    )
+    doc = estimate_alignment_per_donor_chunk(
+        noisy + clean,
+        [(0.0, 180.0), (204.0, 600.0)],
+        base_duration=600.0,
+        donor_duration=624.0,
+        inlier_tolerance=1.5,
+        min_inlier_ratio=0.55,
+        min_chunk_pairs=6,
+        timing_hints=[bad_lock],
+    )
+    assert doc is not None
+    assert doc.strategy == SyncStrategyLevel.PIECEWISE
+    assert int(doc.evidence.get("recovered_chunks", 0)) == 1
+    assert len(doc.segments) == 2
+    early = min(doc.segments, key=lambda s: s.donor_start)
+    assert early.donor_start == pytest.approx(0.0)
+    assert early.donor_end == pytest.approx(180.0)
+    assert early.speed == pytest.approx(post_speed, abs=0.02)
+    assert early.offset_seconds == pytest.approx(post_offset, abs=0.5)
+    assert any("sibling chunk model" in n for n in doc.notes)
+    # Sibling preferred over the (wrong) head lock.
+    assert not any("curve_walk_lock" in n for n in doc.notes)
+
+
+def test_failed_chunk_recovers_via_best_lock_hint() -> None:
+    """Without a sibling fit, use the highest-score lock inside the keep."""
+    # Only one keep-chunk, and its pairs are pure noise → no global fit.
+    noisy = [
+        TimePair(float(t), float((t % 13) * 5), 0.9, "video_match")
+        for t in range(10, 200, 8)
+    ]
+    weak_head = ChunkTimingHint(
+        speed=1.0,
+        offset_seconds=-2.0,
+        score=0.4,
+        donor_time=12.0,
+    )
+    strong_mid = ChunkTimingHint(
+        speed=0.96,
+        offset_seconds=-3.2,
+        score=0.85,
+        donor_time=100.0,
+    )
+    doc = estimate_alignment_per_donor_chunk(
+        noisy,
+        [(0.0, 220.0)],
+        base_duration=600.0,
+        donor_duration=624.0,
+        inlier_tolerance=1.5,
+        min_chunk_pairs=6,
+        timing_hints=[weak_head, strong_mid],
+    )
+    assert doc is not None
+    assert int(doc.evidence.get("recovered_chunks", 0)) == 1
+    assert len(doc.segments) == 1
+    seg = doc.segments[0]
+    assert seg.speed == pytest.approx(0.96, abs=0.01)
+    assert seg.offset_seconds == pytest.approx(-3.2, abs=0.05)
+    assert any("curve_walk_lock" in n for n in doc.notes)
+
+
+def test_failed_chunk_skipped_without_sibling_or_hint() -> None:
+    """No sibling and no lock hint ⇒ keep previous skip behavior."""
+    noisy_a = [
+        TimePair(float(t), float((t % 11) * 7), 0.9, "video_match")
+        for t in range(10, 160, 8)
+    ]
+    noisy_b = [
+        TimePair(float(t), float((t % 9) * 6), 0.9, "video_match")
+        for t in range(220, 400, 8)
+    ]
+    # Single failing keep, no hints → nothing to emit.
+    assert (
+        estimate_alignment_per_donor_chunk(
+            noisy_a,
+            [(0.0, 180.0)],
+            base_duration=600.0,
+            donor_duration=200.0,
+            inlier_tolerance=1.5,
+            min_chunk_pairs=6,
+            timing_hints=None,
+        )
+        is None
+    )
+    # Two failing keeps, no hints → still nothing.
+    assert (
+        estimate_alignment_per_donor_chunk(
+            noisy_a + noisy_b,
+            [(0.0, 180.0), (204.0, 420.0)],
+            base_duration=600.0,
+            donor_duration=450.0,
+            inlier_tolerance=1.5,
+            min_chunk_pairs=6,
+        )
+        is None
+    )
+
+
 def test_detect_from_artifacts_uses_visual_first() -> None:
     base_audio = AudioAnalysisArtifact(
         source_path=Path("base"),
@@ -418,6 +544,47 @@ def test_estimate_prefers_speed_model_over_speed1_approximation() -> None:
     assert abs(doc.global_speed - 0.96) < 0.02
     assert doc.global_offset_seconds is not None
     assert abs(doc.global_offset_seconds - 2.5) < 1.0
+
+
+def test_fit_speed_offset_recovers_non_grid_retime() -> None:
+    """Mild retimes (e.g. 23.976/25) must not quantize to the nearest 0.01 grid."""
+    true_speed = 23.976 / 25.0  # ≈ 0.95904 — between coarse 0.95 and 0.96
+    true_offset = -1.05
+    pairs = [
+        TimePair(float(t), true_speed * float(t) + true_offset, 0.95, "video_match")
+        for t in range(500, 3500, 10)
+    ]
+    fit = fit_speed_offset(pairs, inlier_tolerance=1.5)
+    assert fit is not None
+    assert abs(fit.speed - true_speed) < 0.001
+    assert abs(fit.offset - true_offset) < 0.05
+    # Must not snap to exact 0.96 (the failure mode that drifted Pagemaster).
+    assert abs(fit.speed - 0.96) > 0.0005
+
+
+def test_long_chunk_splits_when_single_affine_cannot_explain() -> None:
+    """Two retimes in one keep-chunk: split instead of one compromised map."""
+    # First half: offset map; second half: 0.96 speed — whole-chunk global fails,
+    # halves succeed. Title-agnostic recovery via split (not a PAL-only knob).
+    pairs = [
+        TimePair(float(t), float(t) - 2.0, 0.95, "video_match")
+        for t in range(40, 400, 8)
+    ] + [
+        TimePair(float(t), 0.96 * float(t) + 20.0, 0.95, "video_match")
+        for t in range(420, 900, 8)
+    ]
+    doc = estimate_alignment_per_donor_chunk(
+        pairs,
+        [(0.0, 950.0)],
+        base_duration=1000.0,
+        donor_duration=950.0,
+        inlier_tolerance=1.5,
+        min_inlier_ratio=0.55,
+        min_chunk_pairs=6,
+    )
+    assert doc is not None
+    assert len(doc.segments) >= 2
+    assert any("splitting" in n for n in doc.notes)
 
 
 def test_lock_for_donor_chunk_prefers_resume_near_chunk_start() -> None:
