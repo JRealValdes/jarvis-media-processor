@@ -148,6 +148,19 @@ uv run jmp batch list
 
 Pairing layouts, roots, and skip/retry rules: [docs/batch-workflows.md](docs/batch-workflows.md).
 
+### Scheduled execution
+
+Prefer an OS scheduler invoking one tick (dedupe against completed jobs). Optional in-process loop for local polling:
+
+```bash
+uv run jmp schedule plan path/to/incoming -o path/to/outgoing
+uv run jmp schedule tick path/to/incoming -o path/to/outgoing
+uv run jmp schedule loop path/to/incoming -o path/to/outgoing --interval 3600
+uv run jmp schedule show
+```
+
+Rationale and cron / systemd / Task Scheduler examples: [docs/scheduled-execution.md](docs/scheduled-execution.md).
+
 ### Mux
 
 Stream-copy base A/V and attach the reconstructed (or fine-warped) donor audio as an extra track:
@@ -184,6 +197,8 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 | `JMP_WORK_DIR` | `.jmp` | Temp / job workspace root |
 | `JMP_BATCH_INPUT_DIR` | (unset) | Default batch input root |
 | `JMP_BATCH_OUTPUT_DIR` | (unset) | Default batch output root |
+| `JMP_SCHEDULE_INTERVAL_SECONDS` | `3600` | Default `jmp schedule loop` interval |
+| `JMP_SCHEDULE_RETRY_FAILED` | `false` | Re-queue failed pairs on schedule ticks |
 | `JMP_FFMPEG_PATH` | `ffmpeg` | FFmpeg executable |
 | `JMP_FFPROBE_PATH` | `ffprobe` | FFprobe executable |
 | `JMP_FINE_WARP_*` | (see Settings) | Dense residual lag field after reconstruct — [docs/fine-warp.md](docs/fine-warp.md) |
@@ -203,6 +218,7 @@ src/jarvis_media_processor/
   report/        # Processing reports / validation
   jobs/          # Standalone job runner + store
   batch/         # Folder pairing + batch enqueue
+  schedule/      # Unattended ticks (OS scheduler preferred)
   api/           # HTTP API (planned)
 ```
 

@@ -54,6 +54,21 @@ class Settings(BaseSettings):
             "``JMP_WORK_DIR``."
         ),
     )
+    schedule_interval_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description=(
+            "Default sleep between ticks for optional ``jmp schedule loop`` "
+            "(prefer OS cron/Task Scheduler invoking ``jmp schedule tick``)."
+        ),
+    )
+    schedule_retry_failed: bool = Field(
+        default=False,
+        description=(
+            "When True, scheduled ticks re-queue failed/cancelled pairs. "
+            "Completed work is never reprocessed."
+        ),
+    )
     ffmpeg_path: str = Field(
         default="ffmpeg",
         description="FFmpeg executable name or path (must be on PATH unless absolute).",
