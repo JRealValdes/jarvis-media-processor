@@ -17,8 +17,10 @@ from jarvis_media_processor.alignment.curve_walk import CurveLock
 from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
     ChunkTimingHint,
+    bridge_surplus_donor_gaps,
     estimate_alignment,
     estimate_alignment_visual_first,
+    subtract_base_intervals,
 )
 from jarvis_media_processor.alignment.evidence import (
     TimePair,
@@ -170,12 +172,54 @@ def detect_alignment_from_artifacts(
             speed_min=speed_min,
             speed_max=speed_max,
         )
-    if unrelated_donor_intervals or missing_base_intervals:
+    excluded_for_bridge = list(excluded)
+    bridges, recovered_surplus, bridge_notes = bridge_surplus_donor_gaps(
+        doc.segments,
+        excluded_for_bridge,
+        base_duration=base_audio.duration_seconds,
+    )
+    if bridges:
+        doc.segments = sorted(
+            list(doc.segments) + bridges,
+            key=lambda s: (s.base_start, s.donor_start),
+        )
+        doc.notes = list(doc.notes) + bridge_notes
+        evidence = dict(doc.evidence)
+        evidence["bridged_surplus_chunks"] = len(bridges)
+        doc.evidence = evidence
+        for note in bridge_notes:
+            logger.info("%s", note)
+
+    recovered_set = {(round(a, 3), round(b, 3)) for a, b in recovered_surplus}
+
+    def _is_recovered(item: TimelineInterval) -> bool:
+        key = (round(float(item.start), 3), round(float(item.end), 3))
+        return key in recovered_set
+
+    unrelated_kept = [
+        item
+        for item in (unrelated_donor_intervals or [])
+        if item.timeline != "donor" or not _is_recovered(item)
+    ]
+    missing_kept = subtract_base_intervals(
+        list(missing_base_intervals or []),
+        [(seg.base_start, seg.base_end) for seg in bridges],
+    )
+    if unrelated_kept or missing_kept:
         apply_unrelated_to_document(
             doc,
-            unrelated_donor_intervals or [],
-            missing_base=missing_base_intervals,
+            unrelated_kept,
+            missing_base=missing_kept or None,
         )
+    elif bridges and not unrelated_kept and not missing_kept:
+        # All surplus was bridged and no missing-base left — still record empty.
+        doc.unrelated_donor_intervals = []
+        doc.missing_base_intervals = []
+        evidence = dict(doc.evidence)
+        evidence["unrelated_donor_spans"] = 0
+        evidence["unrelated_donor_seconds"] = 0
+        evidence["missing_base_spans"] = 0
+        doc.evidence = evidence
     if refine_audio_offset and (visual_matches or activity_pairs):
         doc, refinement = refine_alignment_audio_offset(
             doc,

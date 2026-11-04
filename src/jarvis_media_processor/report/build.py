@@ -12,6 +12,7 @@ from jarvis_media_processor.report.validate import (
     alignment_status_findings,
     base_coverage,
     duration_mismatch_finding,
+    format_abrupt_coverage_summary,
     low_confidence_findings,
     placement_overlaps,
     skipped_segment_findings,
@@ -74,6 +75,11 @@ def build_processing_report(
     # Surplus-only runs should not force review by themselves (info findings).
 
     notes = list(reconstruction.notes)
+    silence_summary = format_abrupt_coverage_summary(
+        findings,
+        min_seconds=cfg.report_min_gap_seconds,
+    )
+    notes.extend(silence_summary.splitlines())
     notes.append(
         "Manual review rules: any ERROR finding; FAILED strategy; "
         f"global confidence < {cfg.report_min_global_confidence:.2f}; "

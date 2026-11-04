@@ -15,9 +15,14 @@ from jarvis_media_processor.alignment import (
     estimate_alignment_per_donor_chunk,
     estimate_alignment_visual_first,
 )
-from jarvis_media_processor.alignment.estimate import fit_speed_offset
+from jarvis_media_processor.alignment.estimate import (
+    bridge_surplus_donor_gaps,
+    fit_speed_offset,
+    subtract_base_intervals,
+)
 from jarvis_media_processor.alignment.detect import detect_alignment_from_artifacts
 from jarvis_media_processor.alignment.evidence import TimePair, landmark_time_pairs
+from jarvis_media_processor.alignment.models import AlignmentSegment, TimelineInterval
 from jarvis_media_processor.audio.models import AcousticLandmark, AudioAnalysisArtifact
 from jarvis_media_processor.fixtures import get_scenario
 from jarvis_media_processor.video.models import FrameCorrespondence
@@ -625,3 +630,167 @@ def test_lock_for_donor_chunk_prefers_resume_near_chunk_start() -> None:
     )
     picked_pre = _lock_for_donor_chunk([head, late_pre], 0.0, 426.7)
     assert picked_pre is head
+
+
+def test_bridge_surplus_when_neighbor_affines_agree() -> None:
+    """False surplus that maps onto the base hole under both neighbors is stitched."""
+    # Geometry mirrors Spider-Man ~6288s: surplus donor maps to the silent base gap.
+    left = AlignmentSegment(
+        base_start=5511.66,
+        base_end=6288.06,
+        donor_start=5285.76,
+        donor_end=6031.56,
+        speed=0.9605917341918885,
+        offset_seconds=-8.698,
+        confidence=0.65,
+        reliable=True,
+    )
+    right = AlignmentSegment(
+        base_start=6340.15,
+        base_end=7272.22,
+        donor_start=6080.56,
+        donor_end=6974.40,
+        speed=0.9589844397487471,
+        offset_seconds=0.455,
+        confidence=0.91,
+        reliable=True,
+    )
+    surplus = [(6031.56, 6080.56)]
+    bridges, recovered, notes = bridge_surplus_donor_gaps(
+        [left, right],
+        surplus,
+        base_duration=7272.27,
+    )
+    assert len(bridges) == 1
+    assert recovered == [(6031.56, 6080.56)]
+    bridge = bridges[0]
+    assert bridge.donor_start == pytest.approx(6031.56)
+    assert bridge.donor_end == pytest.approx(6080.56)
+    assert bridge.base_start == pytest.approx(6288.6, abs=1.0)
+    assert bridge.base_end == pytest.approx(6339.6, abs=1.0)
+    assert any("Bridged surplus donor" in n for n in notes)
+    assert any("Neighbor offsets differ" in n for n in notes)
+
+    missing = [
+        TimelineInterval(
+            start=6311.0,
+            end=6365.0,
+            timeline="base",
+            reason="curve_break_missing_base",
+        )
+    ]
+    trimmed = subtract_base_intervals(
+        missing,
+        [(bridge.base_start, bridge.base_end)],
+    )
+    # Overlap with the bridge is removed; a short tail after the bridge may remain.
+    assert all(item.end > bridge.base_end - 1e-6 or item.start >= bridge.base_end for item in trimmed)
+    assert not any(item.start < bridge.base_end - 1.0 and item.end > bridge.base_start + 1.0 for item in trimmed if item.end - item.start > 5)
+
+
+def test_bridge_surplus_skipped_when_neighbor_affines_disagree() -> None:
+    """True mid-roll ads: neighbors disagree on mapped base → do not bridge."""
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=100.0,
+        donor_start=0.0,
+        donor_end=100.0,
+        speed=1.0,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    # Post-ad chunk resumes ~30s later on base for the same donor clock style.
+    right = AlignmentSegment(
+        base_start=100.0,
+        base_end=200.0,
+        donor_start=130.0,
+        donor_end=230.0,
+        speed=1.0,
+        offset_seconds=30.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    bridges, recovered, notes = bridge_surplus_donor_gaps(
+        [left, right],
+        [(100.0, 130.0)],
+        base_duration=200.0,
+    )
+    assert bridges == []
+    assert recovered == []
+    assert notes == []
+
+
+def test_detect_filters_bridged_surplus_from_unrelated() -> None:
+    """End-to-end: agree-bridge removes surplus from unrelated before carve."""
+    speed = 0.96
+    # Keep 0: donor 0-100 → base via donor = speed*base + 0
+    pairs_a = [
+        TimePair(float(t), speed * float(t), 0.95, "video_match")
+        for t in range(5, 95, 5)
+    ]
+    # Keep 1 after a 20s surplus gap: same affine (false surplus).
+    pairs_b = [
+        TimePair(float(t), speed * float(t), 0.95, "video_match")
+        for t in range(125, 220, 5)
+    ]
+    base = AudioAnalysisArtifact(
+        source_path=Path("base.mkv"),
+        duration_seconds=250.0,
+        sample_rate=48_000,
+        channels=1,
+        landmarks=[],
+        energy_hop_seconds=0.25,
+    )
+    donor = AudioAnalysisArtifact(
+        source_path=Path("donor.avi"),
+        duration_seconds=240.0,
+        sample_rate=48_000,
+        channels=1,
+        landmarks=[],
+        energy_hop_seconds=0.25,
+    )
+    visuals = [
+        FrameCorrespondence(
+            base_time=p.base_time,
+            donor_time=p.donor_time,
+            distance=2,
+            confidence=0.95,
+        )
+        for p in pairs_a + pairs_b
+    ]
+    unrelated = [
+        TimelineInterval(
+            start=100.0,
+            end=120.0,
+            timeline="donor",
+            reason="curve_break_surplus_donor",
+        )
+    ]
+    missing = [
+        TimelineInterval(
+            start=104.0,
+            end=125.0,
+            timeline="base",
+            reason="curve_break_missing_base",
+        )
+    ]
+    doc = detect_alignment_from_artifacts(
+        base,
+        donor,
+        visual_matches=visuals,
+        activity_pairs=[],
+        unrelated_donor_intervals=unrelated,
+        missing_base_intervals=missing,
+        refine_audio_offset=False,
+    )
+    assert int(doc.evidence.get("bridged_surplus_chunks", 0)) >= 1
+    assert not any(
+        abs(item.start - 100.0) < 0.1 and abs(item.end - 120.0) < 0.1
+        for item in doc.unrelated_donor_intervals
+    )
+    assert any(abs(seg.donor_start - 100.0) < 0.5 for seg in doc.segments)
+    # Bridged base coverage should carve the overlapping missing-base region.
+    assert not any(
+        item.start < 110.0 < item.end for item in doc.missing_base_intervals
+    )

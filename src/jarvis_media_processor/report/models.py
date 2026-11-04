@@ -93,6 +93,14 @@ class ProcessingReport(BaseModel):
         lines.append(
             f"findings errors={errors} warnings={warnings} total={len(self.findings)}"
         )
+        # Prefer the abrupt-silence note block when present (added by build).
+        silence_notes = [
+            note
+            for note in self.notes
+            if note.startswith("Abrupt silence") or note.startswith("  base ") or note.startswith("  donor ")
+        ]
+        if silence_notes:
+            lines.extend(silence_notes)
         if self.output_wav is not None:
             lines.append(f"output={self.output_wav}")
         for finding in self.findings[:12]:
