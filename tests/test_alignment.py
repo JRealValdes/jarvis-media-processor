@@ -563,7 +563,7 @@ def test_fit_speed_offset_recovers_non_grid_retime() -> None:
     assert fit is not None
     assert abs(fit.speed - true_speed) < 0.001
     assert abs(fit.offset - true_offset) < 0.05
-    # Must not snap to exact 0.96 (the failure mode that drifted Pagemaster).
+    # Must not snap to the coarse 0.01 grid (e.g. exact 0.96).
     assert abs(fit.speed - 0.96) > 0.0005
 
 
@@ -634,47 +634,49 @@ def test_lock_for_donor_chunk_prefers_resume_near_chunk_start() -> None:
 
 def test_bridge_surplus_when_neighbor_affines_agree() -> None:
     """False surplus that maps onto the base hole under both neighbors is stitched."""
-    # Geometry mirrors Spider-Man ~6288s: surplus donor maps to the silent base gap.
+    # Abstract geometry: different neighbor offsets, but mapped endpoints for the
+    # excluded donor span agree within the bridge tolerance (~2s).
+    d0, d1 = 1000.0, 1050.0
     left = AlignmentSegment(
-        base_start=5511.66,
-        base_end=6288.06,
-        donor_start=5285.76,
-        donor_end=6031.56,
-        speed=0.9605917341918885,
-        offset_seconds=-8.698,
+        base_start=800.0,
+        base_end=1046.9,
+        donor_start=760.0,
+        donor_end=d0,
+        speed=0.96,
+        offset_seconds=-5.0,
         confidence=0.65,
         reliable=True,
     )
     right = AlignmentSegment(
-        base_start=6340.15,
-        base_end=7272.22,
-        donor_start=6080.56,
-        donor_end=6974.40,
-        speed=0.9589844397487471,
-        offset_seconds=0.455,
+        base_start=1099.0,
+        base_end=1400.0,
+        donor_start=d1,
+        donor_end=1340.0,
+        speed=0.9552,
+        offset_seconds=0.2,
         confidence=0.91,
         reliable=True,
     )
-    surplus = [(6031.56, 6080.56)]
+    surplus = [(d0, d1)]
     bridges, recovered, notes = bridge_surplus_donor_gaps(
         [left, right],
         surplus,
-        base_duration=7272.27,
+        base_duration=1500.0,
     )
     assert len(bridges) == 1
-    assert recovered == [(6031.56, 6080.56)]
+    assert recovered == [(d0, d1)]
     bridge = bridges[0]
-    assert bridge.donor_start == pytest.approx(6031.56)
-    assert bridge.donor_end == pytest.approx(6080.56)
-    assert bridge.base_start == pytest.approx(6288.6, abs=1.0)
-    assert bridge.base_end == pytest.approx(6339.6, abs=1.0)
+    assert bridge.donor_start == pytest.approx(d0)
+    assert bridge.donor_end == pytest.approx(d1)
+    assert bridge.base_start == pytest.approx(1047.0, abs=2.0)
+    assert bridge.base_end == pytest.approx(1099.0, abs=2.0)
     assert any("Bridged surplus donor" in n for n in notes)
     assert any("Neighbor offsets differ" in n for n in notes)
 
     missing = [
         TimelineInterval(
-            start=6311.0,
-            end=6365.0,
+            start=1060.0,
+            end=1110.0,
             timeline="base",
             reason="curve_break_missing_base",
         )

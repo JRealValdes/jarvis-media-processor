@@ -249,6 +249,7 @@ def _activity_pairs_from_report(
     list[TimelineInterval],
     list[TimelineInterval],
     list[CurveLock],
+    list[str],
 ]:
     cfg = settings or get_settings()
     period = float(report.params.get("activity_sample_period", 1.0) or 1.0)
@@ -263,7 +264,7 @@ def _activity_pairs_from_report(
         sample_period=period,
     )
     if base_env is None or donor_env is None:
-        return [], None, [], [], []
+        return [], None, [], [], [], []
     frame_confirm = None
     if report.base_frames and report.donor_frames:
         frame_confirm = make_frame_confirmer(
@@ -286,7 +287,8 @@ def _activity_pairs_from_report(
     )
     unrelated = walk.unrelated_donor_intervals
     missing_base = walk.missing_base_intervals
-    for note in walk.notes:
+    walk_notes = list(walk.notes)
+    for note in walk_notes:
         logger.info("Curve walk: %s", note)
 
     # Fit activity sync per contiguous donor chunk outside ads.
@@ -339,7 +341,7 @@ def _activity_pairs_from_report(
         len(missing_base),
         len(chunks),
     )
-    return pairs, sync, unrelated, missing_base, list(walk.locks)
+    return pairs, sync, unrelated, missing_base, list(walk.locks), walk_notes
 
 
 def detect_alignment(
@@ -376,6 +378,7 @@ def detect_alignment(
     unrelated_donor: list[TimelineInterval] = []
     missing_base: list[TimelineInterval] = []
     walk_locks: list[CurveLock] = []
+    walk_notes: list[str] = []
     if use_video:
         try:
             report = match_media_visuals(base, donor, work / "visual", settings=cfg)
@@ -386,6 +389,7 @@ def detect_alignment(
                 unrelated_donor,
                 missing_base,
                 walk_locks,
+                walk_notes,
             ) = _activity_pairs_from_report(report, settings=cfg)
             if activity_sync is not None:
                 (work / "activity_sync.json").write_text(
@@ -412,6 +416,7 @@ def detect_alignment(
                                 }
                                 for item in missing_base
                             ],
+                            "curve_walk_notes": walk_notes,
                         },
                         indent=2,
                     )
@@ -442,6 +447,21 @@ def detect_alignment(
         audio_refine_min_score=cfg.alignment_audio_refine_min_score,
         refine_audio_offset=bool(visual_matches or activity_pairs),
     )
+    if walk_notes:
+        # Keep decision trail on the alignment doc (also in activity_sync.json).
+        decision_notes = [
+            n
+            for n in walk_notes
+            if n.startswith("Break decision")
+            or n.startswith("Rejected surplus")
+            or n.startswith("Surplus donor")
+            or n.startswith("Missing base")
+            or n.startswith("Speed refine")
+        ]
+        doc.notes = list(doc.notes) + decision_notes
+        evidence = dict(doc.evidence)
+        evidence["curve_walk_note_count"] = len(walk_notes)
+        doc.evidence = evidence
 
     out = work / "alignment.json"
     out.write_text(doc.model_dump_json(indent=2) + "\n", encoding="utf-8")

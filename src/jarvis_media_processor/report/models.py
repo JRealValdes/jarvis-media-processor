@@ -30,12 +30,15 @@ class ValidationFinding(BaseModel):
 
 
 class CoverageSummary(BaseModel):
-    """How much of the base timeline is covered by reconstructed placements."""
+    """How much of the base/donor timelines are covered by placements."""
 
     base_duration_seconds: float
     covered_seconds: float
     gap_seconds: float
     coverage_ratio: float = Field(ge=0, le=1)
+    donor_duration_seconds: float | None = None
+    donor_used_seconds: float | None = None
+    donor_utilization_ratio: float | None = Field(default=None, ge=0, le=1)
 
 
 class ProcessingReport(BaseModel):
@@ -73,10 +76,22 @@ class ProcessingReport(BaseModel):
         if self.review_reasons:
             lines.append("review_reasons: " + "; ".join(self.review_reasons))
         if self.coverage is not None:
-            lines.append(
-                f"coverage={self.coverage.coverage_ratio:.1%} "
-                f"(gaps={self.coverage.gap_seconds:.2f}s)"
+            cov = self.coverage
+            line = (
+                f"base_covered={cov.coverage_ratio:.1%} "
+                f"({cov.covered_seconds:.1f}/{cov.base_duration_seconds:.1f}s; "
+                f"gaps={cov.gap_seconds:.2f}s)"
             )
+            if (
+                cov.donor_utilization_ratio is not None
+                and cov.donor_used_seconds is not None
+                and cov.donor_duration_seconds is not None
+            ):
+                line += (
+                    f" donor_used={cov.donor_utilization_ratio:.1%} "
+                    f"({cov.donor_used_seconds:.1f}/{cov.donor_duration_seconds:.1f}s)"
+                )
+            lines.append(line)
         lines.append(
             f"segments={self.segment_count} placements={self.placement_count} "
             f"skipped={self.skipped_segment_count}"

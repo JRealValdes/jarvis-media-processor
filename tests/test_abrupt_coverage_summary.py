@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
+
+from jarvis_media_processor.reconstruct.models import Placement
 from jarvis_media_processor.report.models import FindingSeverity, ValidationFinding
 from jarvis_media_processor.report.validate import (
     abrupt_coverage_span_lines,
+    base_coverage,
     format_abrupt_coverage_summary,
     format_hhmmss,
 )
 
 
-def test_format_hhmmss_rounds_spider_man_silence() -> None:
+def test_format_hhmmss_rounds_long_runtime() -> None:
     assert format_hhmmss(6288.06) == "01:44:48"
     assert format_hhmmss(6311.0) == "01:45:11"
 
@@ -79,3 +83,32 @@ def test_format_abrupt_coverage_summary_block() -> None:
     text = format_abrupt_coverage_summary(findings)
     assert text.startswith("Abrupt silence / uncovered spans (1):")
     assert "base 00:01:40–00:01:52 (12.5s) unexplained" in text
+
+
+def test_base_coverage_includes_donor_utilization() -> None:
+    placements = [
+        Placement(
+            base_start=0.0,
+            base_end=80.0,
+            donor_start=0.0,
+            donor_end=80.0,
+            speed=1.0,
+        ),
+        Placement(
+            base_start=100.0,
+            base_end=150.0,
+            donor_start=100.0,
+            donor_end=150.0,
+            speed=1.0,
+        ),
+    ]
+    summary, _findings = base_coverage(
+        placements,
+        base_duration=200.0,
+        donor_duration=200.0,
+        min_gap_seconds=0.5,
+    )
+    assert summary.coverage_ratio == pytest.approx(0.65)
+    assert summary.donor_used_seconds == pytest.approx(130.0)
+    assert summary.donor_duration_seconds == pytest.approx(200.0)
+    assert summary.donor_utilization_ratio == pytest.approx(0.65)

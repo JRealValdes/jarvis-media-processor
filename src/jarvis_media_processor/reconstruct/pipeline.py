@@ -181,6 +181,9 @@ def reconstruct_donor_audio(
         report_path,
         report.needs_manual_review,
     )
+    coverage_notes = [
+        note for note in report.notes if note.startswith("Coverage:")
+    ]
     silence_notes = [
         note
         for note in report.notes
@@ -188,6 +191,8 @@ def reconstruct_donor_audio(
         or note.startswith("  base ")
         or note.startswith("  donor ")
     ]
+    for note in coverage_notes:
+        logger.info("%s", note)
     if silence_notes:
         logger.info("%s", "\n".join(silence_notes))
     return result

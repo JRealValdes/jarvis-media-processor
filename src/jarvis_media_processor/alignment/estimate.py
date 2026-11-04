@@ -580,11 +580,12 @@ def bridge_surplus_donor_gaps(
     min_bridge_seconds: float = _BRIDGE_MIN_DONOR_SECONDS,
     conf_scale: float = _BRIDGE_CONF_SCALE,
 ) -> tuple[list[AlignmentSegment], list[tuple[float, float]], list[str]]:
-    """Recover bridge segments when excluded surplus maps onto a base hole.
+    """Pass-2 consistency law: retract false surplus when neighbors agree.
 
-    True mid-roll ads usually sit between keeps whose affines disagree on the
-    mapped base span — those are left excluded. False surplus (same content,
-    neighbors agree) is stitched back so the graft does not go silent.
+    Curve-walk may *propose* surplus. After piecewise fit, if an excluded donor
+    span maps onto the base hole under agreeing neighbor affines, reclassify it
+    as placeable content (bridge). True mid-roll ads leave disagreeing affines
+    and stay excluded.
     """
     if not segments or not surplus:
         return [], [], []

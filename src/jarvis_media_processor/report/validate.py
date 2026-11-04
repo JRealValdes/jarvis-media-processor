@@ -120,6 +120,7 @@ def base_coverage(
     base_duration: float,
     explained_gaps: list[tuple[float, float]] | None = None,
     min_gap_seconds: float = 0.5,
+    donor_duration: float | None = None,
 ) -> tuple[CoverageSummary, list[ValidationFinding]]:
     """Measure placement coverage and report unexplained base gaps."""
     duration = max(0.0, float(base_duration))
@@ -127,6 +128,19 @@ def base_coverage(
         [(p.base_start, min(p.base_end, duration)) for p in placements if p.base_end > p.base_start]
     )
     covered = sum(end - start for start, end in covered_spans)
+    donor_spans = _merge_intervals(
+        [
+            (float(p.donor_start), float(p.donor_end))
+            for p in placements
+            if p.donor_end > p.donor_start
+        ]
+    )
+    donor_used = sum(end - start for start, end in donor_spans)
+    donor_dur: float | None = None
+    donor_ratio: float | None = None
+    if donor_duration is not None and float(donor_duration) > 1e-9:
+        donor_dur = max(0.0, float(donor_duration))
+        donor_ratio = max(0.0, min(1.0, donor_used / donor_dur))
     explained = _merge_intervals(list(explained_gaps or []))
 
     gaps: list[tuple[float, float]] = []
@@ -189,6 +203,9 @@ def base_coverage(
         covered_seconds=covered,
         gap_seconds=gap_seconds,
         coverage_ratio=ratio,
+        donor_duration_seconds=donor_dur,
+        donor_used_seconds=float(donor_used) if donor_spans or donor_dur is not None else None,
+        donor_utilization_ratio=donor_ratio,
     )
     return summary, findings
 
