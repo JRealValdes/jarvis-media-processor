@@ -45,7 +45,9 @@ def _fresh_alignment(name: str):
     report = VisualMatchReport.model_validate_json(
         report_path.read_text(encoding="utf-8")
     )
-    pairs, _sync, unrelated, missing = _activity_pairs_from_report(report)
+    pairs, _sync, unrelated, missing, _locks, _notes = _activity_pairs_from_report(
+        report
+    )
     doc = detect_alignment_from_artifacts(
         _load_audio(align / "audio_base"),
         _load_audio(align / "audio_donor"),

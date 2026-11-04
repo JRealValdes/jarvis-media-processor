@@ -485,6 +485,22 @@ _RESIDUAL_DRIFT_SPLIT_SECONDS = 0.75
 _MIN_DRIFT_SPLIT_DONOR_SPAN = 180.0
 _MIN_DRIFT_SPLIT_PAIRS = 12
 _MAX_DRIFT_SPLIT_DEPTH = 2
+# Bridge a surplus-donor gap when neighbor affines agree on the mapped base hole.
+_BRIDGE_EDGE_MATCH_SECONDS = 2.0
+_BRIDGE_MAX_MODEL_DISAGREE_SECONDS = 2.0
+_BRIDGE_MIN_DONOR_SECONDS = 1.0
+_BRIDGE_CONF_SCALE = 0.75
+_BRIDGE_OFFSET_JUMP_NOTE_SECONDS = 2.0
+# Donor span through a missing-base hole must match speed*base_span (10s≈10.05s OK; 20s not).
+_MISSING_DURATION_REL_TOL = 0.05
+_MISSING_DURATION_ABS_TOL_SECONDS = 0.75
+_MISSING_MIN_BASE_SECONDS = 1.0
+# Close base seams where donor is already continuous by slowing both neighbors
+# with one common factor f=(B_L+B_R)/(B_L+B_R+G). Cap slowdown at 2% (f≥0.98):
+# micro fit seams pass; a 1s hole between two 10s keeps is rejected.
+_SEAM_MIN_SPEED_FACTOR = 0.98
+_SEAM_DONOR_CONTINUITY_SECONDS = 1e-3
+_SEAM_MIN_GAP_SECONDS = 1e-4
 
 
 @dataclass(frozen=True)
@@ -557,6 +573,390 @@ def _nearest_sibling_segment(
         fitted,
         key=lambda seg: abs(0.5 * (seg.donor_start + seg.donor_end) - mid),
     )
+
+
+def _base_of_donor(donor_t: float, *, speed: float, offset: float) -> float:
+    model_speed = speed if speed > 0 else 1.0
+    return (donor_t - offset) / max(model_speed, 1e-6)
+
+
+def _donor_of_base(base_t: float, *, speed: float, offset: float) -> float:
+    model_speed = speed if speed > 0 else 1.0
+    return model_speed * base_t + offset
+
+
+def _duration_compatible(
+    base_span: float,
+    donor_span: float,
+    *,
+    speed: float,
+) -> bool:
+    """True when donor length matches ``speed * base_span`` within abs/rel tolerance."""
+    if base_span <= 0 or donor_span <= 0:
+        return False
+    model_speed = speed if speed > 0 else 1.0
+    expected = model_speed * base_span
+    tol = max(_MISSING_DURATION_ABS_TOL_SECONDS, _MISSING_DURATION_REL_TOL * expected)
+    return abs(donor_span - expected) <= tol + 1e-9
+
+
+def bridge_surplus_donor_gaps(
+    segments: list[AlignmentSegment],
+    surplus: list[tuple[float, float]],
+    *,
+    base_duration: float | None = None,
+    edge_match_seconds: float = _BRIDGE_EDGE_MATCH_SECONDS,
+    max_model_disagree_seconds: float = _BRIDGE_MAX_MODEL_DISAGREE_SECONDS,
+    min_bridge_seconds: float = _BRIDGE_MIN_DONOR_SECONDS,
+    conf_scale: float = _BRIDGE_CONF_SCALE,
+) -> tuple[list[AlignmentSegment], list[tuple[float, float]], list[str]]:
+    """Pass-2 consistency law: retract false surplus when neighbors agree.
+
+    Curve-walk may *propose* surplus. After piecewise fit, if an excluded donor
+    span maps onto the base hole under agreeing neighbor affines, reclassify it
+    as placeable content (bridge). True mid-roll ads leave disagreeing affines
+    and stay excluded.
+    """
+    if not segments or not surplus:
+        return [], [], []
+
+    ordered = sorted(segments, key=lambda s: s.donor_start)
+    bridges: list[AlignmentSegment] = []
+    recovered: list[tuple[float, float]] = []
+    notes: list[str] = []
+
+    for d0, d1 in sorted(surplus):
+        if d1 - d0 < min_bridge_seconds - 1e-9:
+            continue
+        left_candidates = [
+            seg
+            for seg in ordered
+            if abs(seg.donor_end - d0) <= edge_match_seconds
+        ]
+        right_candidates = [
+            seg
+            for seg in ordered
+            if abs(seg.donor_start - d1) <= edge_match_seconds
+        ]
+        if not left_candidates or not right_candidates:
+            continue
+        left = min(left_candidates, key=lambda seg: abs(seg.donor_end - d0))
+        right = min(right_candidates, key=lambda seg: abs(seg.donor_start - d1))
+        if left is right:
+            continue
+
+        left_b0 = _base_of_donor(d0, speed=left.speed, offset=left.offset_seconds)
+        left_b1 = _base_of_donor(d1, speed=left.speed, offset=left.offset_seconds)
+        right_b0 = _base_of_donor(d0, speed=right.speed, offset=right.offset_seconds)
+        right_b1 = _base_of_donor(d1, speed=right.speed, offset=right.offset_seconds)
+        if abs(left_b0 - right_b0) > max_model_disagree_seconds:
+            continue
+        if abs(left_b1 - right_b1) > max_model_disagree_seconds:
+            continue
+
+        # Neighbors agree on the hole → stitch with averaged endpoints / model.
+        b0 = 0.5 * (left_b0 + right_b0)
+        b1 = 0.5 * (left_b1 + right_b1)
+        if b1 < b0:
+            b0, b1 = b1, b0
+        if base_duration is not None:
+            b0 = min(max(0.0, b0), base_duration)
+            b1 = min(max(0.0, b1), base_duration)
+        if b1 - b0 < min_bridge_seconds - 1e-9:
+            continue
+
+        # Require the bridge to land in/near the base gap between neighbors.
+        gap_lo = min(left.base_end, right.base_start)
+        gap_hi = max(left.base_end, right.base_start)
+        if gap_hi - gap_lo < 0.05:
+            # Contiguous on base already — nothing to fill.
+            continue
+        overlap = min(b1, gap_hi) - max(b0, gap_lo)
+        if overlap < min_bridge_seconds - 1e-9:
+            continue
+
+        speed = 0.5 * (left.speed + right.speed)
+        offset = 0.5 * (left.offset_seconds + right.offset_seconds)
+        # Mean (not min) so a slightly weaker neighbor does not push a solid
+        # bridge under the reliable threshold after conf_scale.
+        conf = 0.5 * (float(left.confidence) + float(right.confidence)) * conf_scale
+        segment = AlignmentSegment(
+            base_start=float(b0),
+            base_end=float(b1),
+            donor_start=float(d0),
+            donor_end=float(d1),
+            speed=float(speed),
+            offset_seconds=float(offset),
+            confidence=float(max(0.0, min(1.0, conf))),
+            reliable=conf >= 0.5,
+        )
+        bridges.append(segment)
+        recovered.append((float(d0), float(d1)))
+        offset_jump = abs(left.offset_seconds - right.offset_seconds)
+        note = (
+            f"Bridged surplus donor {d0:.1f}-{d1:.1f}s → base {b0:.1f}-{b1:.1f}s "
+            f"(neighbors agree within {max_model_disagree_seconds:.1f}s; "
+            f"conf={conf:.2f})."
+        )
+        if offset_jump >= _BRIDGE_OFFSET_JUMP_NOTE_SECONDS:
+            note += (
+                f" Neighbor offsets differ by {offset_jump:.2f}s "
+                "(drift-split / dual-offset clue; bridge still used because "
+                "mapped endpoints agree)."
+            )
+        notes.append(note)
+
+    return bridges, recovered, notes
+
+
+def bridge_missing_base_gaps(
+    segments: list[AlignmentSegment],
+    missing: list[tuple[float, float]],
+    *,
+    donor_duration: float | None = None,
+    edge_match_seconds: float = _BRIDGE_EDGE_MATCH_SECONDS,
+    max_model_disagree_seconds: float = _BRIDGE_MAX_MODEL_DISAGREE_SECONDS,
+    min_bridge_seconds: float = _MISSING_MIN_BASE_SECONDS,
+    conf_scale: float = _BRIDGE_CONF_SCALE,
+) -> tuple[list[AlignmentSegment], list[tuple[float, float]], list[str]]:
+    """Pass-2: retract false missing_base when neighbors can place continuous donor.
+
+    If a base hole sits between two keeps whose affines agree on the mapped donor
+    span **and** that donor span has a compatible duration (``≈ speed·hole``),
+    stitch Spanish through the hole instead of EN-fill.
+    """
+    if not segments or not missing:
+        return [], [], []
+
+    ordered = sorted(segments, key=lambda s: s.base_start)
+    bridges: list[AlignmentSegment] = []
+    recovered: list[tuple[float, float]] = []
+    notes: list[str] = []
+
+    for b0, b1 in sorted(missing):
+        base_span = b1 - b0
+        if base_span < min_bridge_seconds - 1e-9:
+            continue
+        left_candidates = [
+            seg
+            for seg in ordered
+            if abs(seg.base_end - b0) <= edge_match_seconds
+        ]
+        right_candidates = [
+            seg
+            for seg in ordered
+            if abs(seg.base_start - b1) <= edge_match_seconds
+        ]
+        # Also accept hole strictly between neighbors (small edge slack).
+        if not left_candidates:
+            left_candidates = [
+                seg for seg in ordered if seg.base_end <= b0 + edge_match_seconds
+            ]
+            if left_candidates:
+                left_candidates = [
+                    max(left_candidates, key=lambda seg: seg.base_end)
+                ]
+        if not right_candidates:
+            right_candidates = [
+                seg for seg in ordered if seg.base_start >= b1 - edge_match_seconds
+            ]
+            if right_candidates:
+                right_candidates = [
+                    min(right_candidates, key=lambda seg: seg.base_start)
+                ]
+        if not left_candidates or not right_candidates:
+            continue
+        left = min(left_candidates, key=lambda seg: abs(seg.base_end - b0))
+        right = min(right_candidates, key=lambda seg: abs(seg.base_start - b1))
+        if left is right:
+            continue
+
+        left_d0 = _donor_of_base(b0, speed=left.speed, offset=left.offset_seconds)
+        left_d1 = _donor_of_base(b1, speed=left.speed, offset=left.offset_seconds)
+        right_d0 = _donor_of_base(b0, speed=right.speed, offset=right.offset_seconds)
+        right_d1 = _donor_of_base(b1, speed=right.speed, offset=right.offset_seconds)
+        if abs(left_d0 - right_d0) > max_model_disagree_seconds:
+            continue
+        if abs(left_d1 - right_d1) > max_model_disagree_seconds:
+            continue
+
+        d0 = 0.5 * (left_d0 + right_d0)
+        d1 = 0.5 * (left_d1 + right_d1)
+        if d1 < d0:
+            d0, d1 = d1, d0
+        if donor_duration is not None:
+            d0 = min(max(0.0, d0), donor_duration)
+            d1 = min(max(0.0, d1), donor_duration)
+        donor_span = d1 - d0
+        if donor_span < min_bridge_seconds - 1e-9:
+            continue
+
+        speed = 0.5 * (left.speed + right.speed)
+        if not _duration_compatible(base_span, donor_span, speed=speed):
+            notes.append(
+                f"Skipped missing-base bridge {b0:.1f}-{b1:.1f}s: donor span "
+                f"{donor_span:.2f}s incompatible with base {base_span:.2f}s "
+                f"at speed={speed:.4f}."
+            )
+            continue
+
+        # Prefer stitching the actual hole (not an oversized map).
+        conf = 0.5 * (float(left.confidence) + float(right.confidence)) * conf_scale
+        offset = 0.5 * (left.offset_seconds + right.offset_seconds)
+        segment = AlignmentSegment(
+            base_start=float(b0),
+            base_end=float(b1),
+            donor_start=float(d0),
+            donor_end=float(d1),
+            speed=float(speed),
+            offset_seconds=float(offset),
+            confidence=float(max(0.0, min(1.0, conf))),
+            reliable=conf >= 0.5,
+        )
+        bridges.append(segment)
+        recovered.append((float(b0), float(b1)))
+        notes.append(
+            f"Bridged missing-base {b0:.1f}-{b1:.1f}s → donor {d0:.1f}-{d1:.1f}s "
+            f"(neighbors agree; duration ok; conf={conf:.2f})."
+        )
+
+    return bridges, recovered, notes
+
+
+def close_donor_continuous_seams(
+    segments: list[AlignmentSegment],
+    *,
+    min_speed_factor: float = _SEAM_MIN_SPEED_FACTOR,
+    donor_continuity_seconds: float = _SEAM_DONOR_CONTINUITY_SECONDS,
+    min_gap_seconds: float = _SEAM_MIN_GAP_SECONDS,
+) -> tuple[list[AlignmentSegment], list[str]]:
+    """Close base gaps between keeps when donor already abuts (no free donor).
+
+    Independent affine fits often leave a small base discontinuity at a donor
+    chunk boundary while ``left.donor_end == right.donor_start``. That is a seam,
+    not missing content: stretch both neighbors by a **common** speed factor
+
+        f = (B_L + B_R) / (B_L + B_R + G)
+
+    so each absorbs gap proportional to its base duration (longer keep stretches
+    more in absolute time; the join lands nearer the shorter neighbor). Reject
+    when ``f < min_speed_factor`` (default 0.98 → at most 2% slowdown).
+    """
+    if len(segments) < 2:
+        return list(segments), []
+
+    ordered = sorted(segments, key=lambda s: (s.base_start, s.donor_start))
+    notes: list[str] = []
+    closed = 0
+
+    for i in range(len(ordered) - 1):
+        left = ordered[i]
+        right = ordered[i + 1]
+        gap = float(right.base_start) - float(left.base_end)
+        if gap < min_gap_seconds:
+            continue
+        donor_gap = float(right.donor_start) - float(left.donor_end)
+        if abs(donor_gap) > donor_continuity_seconds:
+            continue
+
+        b_left = float(left.base_end) - float(left.base_start)
+        b_right = float(right.base_end) - float(right.base_start)
+        if b_left <= 1e-9 or b_right <= 1e-9:
+            continue
+        denom = b_left + b_right + gap
+        factor = (b_left + b_right) / denom
+        if factor < min_speed_factor - 1e-15:
+            notes.append(
+                f"Skipped seam close base {left.base_end:.3f}-{right.base_start:.3f}s "
+                f"(gap={gap:.3f}s): common speed factor {factor:.5f} < "
+                f"min {min_speed_factor:.5f}."
+            )
+            continue
+
+        meet = float(left.base_start) + b_left / factor
+        new_left_speed = float(left.speed) * factor
+        new_right_speed = float(right.speed) * factor
+        new_left = AlignmentSegment(
+            base_start=float(left.base_start),
+            base_end=float(meet),
+            donor_start=float(left.donor_start),
+            donor_end=float(left.donor_end),
+            speed=float(new_left_speed),
+            offset_seconds=float(left.donor_start) - new_left_speed * float(left.base_start),
+            confidence=float(left.confidence),
+            reliable=left.reliable,
+        )
+        new_right = AlignmentSegment(
+            base_start=float(meet),
+            base_end=float(right.base_end),
+            donor_start=float(right.donor_start),
+            donor_end=float(right.donor_end),
+            speed=float(new_right_speed),
+            offset_seconds=float(right.donor_start) - new_right_speed * float(meet),
+            confidence=float(right.confidence),
+            reliable=right.reliable,
+        )
+        ordered[i] = new_left
+        ordered[i + 1] = new_right
+        closed += 1
+        left_share = b_left * gap / (b_left + b_right)
+        right_share = gap - left_share
+        notes.append(
+            f"Closed donor-continuous seam base {left.base_end:.3f}-{right.base_start:.3f}s "
+            f"(gap={gap:.3f}s → meet={meet:.3f}s; speed×{factor:.5f}; "
+            f"absorbed L={left_share:.3f}s R={right_share:.3f}s)."
+        )
+
+    if closed:
+        notes.append(
+            f"Closed {closed} donor-continuous base seam(s) "
+            f"(min speed factor {min_speed_factor:.3f})."
+        )
+    return ordered, notes
+
+
+def subtract_base_intervals(
+    intervals: list[TimelineInterval],
+    covered: list[tuple[float, float]],
+    *,
+    min_duration: float = 0.05,
+) -> list[TimelineInterval]:
+    """Remove ``covered`` base spans from missing-base intervals (no EN overwrite)."""
+    if not intervals or not covered:
+        return list(intervals)
+    covered_merged = sorted(
+        ((float(a), float(b)) for a, b in covered if b > a),
+        key=lambda item: item[0],
+    )
+    out: list[TimelineInterval] = []
+    for item in intervals:
+        if item.timeline != "base":
+            out.append(item)
+            continue
+        remaining = [(float(item.start), float(item.end))]
+        for c0, c1 in covered_merged:
+            next_remaining: list[tuple[float, float]] = []
+            for r0, r1 in remaining:
+                if c1 <= r0 or c0 >= r1:
+                    next_remaining.append((r0, r1))
+                    continue
+                if c0 > r0:
+                    next_remaining.append((r0, c0))
+                if c1 < r1:
+                    next_remaining.append((c1, r1))
+            remaining = next_remaining
+        for r0, r1 in remaining:
+            if r1 - r0 < min_duration - 1e-9:
+                continue
+            out.append(
+                TimelineInterval(
+                    start=r0,
+                    end=r1,
+                    timeline="base",
+                    reason=item.reason,
+                )
+            )
+    return out
 
 
 def _pair_residual_drift_seconds(

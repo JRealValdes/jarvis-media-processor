@@ -17,10 +17,6 @@ from jarvis_media_processor.reconstruct.render import (
     fill_missing_base_audio,
     render_placements,
 )
-from jarvis_media_processor.report.build import (
-    build_processing_report,
-    write_processing_report,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +159,13 @@ def reconstruct_donor_audio(
         result.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
+    # Lazy import avoids circular import: report.build → reconstruct.models →
+    # reconstruct.__init__ → pipeline → report.build.
+    from jarvis_media_processor.report.build import (
+        build_processing_report,
+        write_processing_report,
+    )
+
     report = build_processing_report(
         alignment,
         result,
@@ -178,6 +181,20 @@ def reconstruct_donor_audio(
         report_path,
         report.needs_manual_review,
     )
+    coverage_notes = [
+        note for note in report.notes if note.startswith("Coverage:")
+    ]
+    silence_notes = [
+        note
+        for note in report.notes
+        if note.startswith("Abrupt silence")
+        or note.startswith("  base ")
+        or note.startswith("  donor ")
+    ]
+    for note in coverage_notes:
+        logger.info("%s", note)
+    if silence_notes:
+        logger.info("%s", "\n".join(silence_notes))
     return result
 
 

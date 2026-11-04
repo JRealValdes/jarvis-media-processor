@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from jarvis_media_processor.alignment.curve_walk import (
+    _continuous_map_supported_by_frames,
     _find_forward_missing,
     _find_forward_surplus,
     _missing_gap_credible,
@@ -102,8 +103,107 @@ def test_curve_walk_refines_speed_instead_of_inventing_ad() -> None:
         f"speed drift must not invent ads; got {result.unrelated_donor_intervals}"
     )
     assert any("Speed refine" in n for n in result.notes), result.notes
+    assert any("Break decision" in n for n in result.notes), result.notes
     refined = [lock for lock in result.locks if abs(lock.speed - true_speed) < 0.04]
     assert refined, f"expected a lock near {true_speed}; locks={result.locks}"
+
+
+def test_curve_walk_framed_retime_does_not_invent_surplus() -> None:
+    """Optimistic frame confirms must not turn a speed retime into a false ad."""
+    base, donor, true_speed = _donor_with_mid_speed_change()
+
+    def frame_confirm(base_t: float, donor_t: float) -> bool:
+        # Agree near the continuing map under the true speed (not a jump).
+        expected = true_speed * base_t if base_t > 40.0 else base_t
+        return abs(donor_t - expected) <= 3.0
+
+    result = walk_activity_curves(
+        base,
+        donor,
+        half_window=6.0,
+        hop_seconds=2.0,
+        min_score=0.25,
+        break_score=0.18,
+        confirm_seconds=6.0,
+        min_surplus_seconds=8.0,
+        max_surplus_seconds=80.0,
+        missing_base_fill_seconds=3.0,
+        speed_candidates=(1.0,),
+        frame_confirm=frame_confirm,
+    )
+    assert not result.unrelated_donor_intervals, (
+        f"framed retime must not invent ads; got {result.unrelated_donor_intervals}; "
+        f"notes={result.notes}"
+    )
+
+
+def test_multi_signal_rejects_surplus_when_frames_support_continuous_map() -> None:
+    """pHash agreement along the pre-jump map vetoes an activity-only surplus."""
+    base, donor, (ad0, ad1) = _donor_with_ad_block()
+
+    def frames_say_continuous(base_t: float, donor_t: float) -> bool:
+        # Pretend picture still matches donor≈base (no insert) through 40..60.
+        return abs(donor_t - base_t) <= 1.5
+
+    hit = _find_forward_surplus(
+        base,
+        donor,
+        base_time=40.0,
+        offset=0.0,
+        speed=1.0,
+        half_window=6.0,
+        period=1.0,
+        min_score=0.25,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=80.0,
+        break_score=0.18,
+        donor_start=0.0,
+        donor_end=99.0,
+        frame_confirm=frames_say_continuous,
+        confirm_seconds=6.0,
+        hop_seconds=2.0,
+    )
+    assert hit is None
+    assert _continuous_map_supported_by_frames(
+        frames_say_continuous,
+        donor_gap_start=ad0,
+        donor_gap_end=ad1,
+        speed=1.0,
+        offset=0.0,
+        period=1.0,
+    )
+
+
+def test_multi_signal_allows_surplus_when_frames_only_support_post_ad() -> None:
+    """True insert: frames agree on the jumped offset, not the continuous map."""
+    base, donor, (ad0, ad1) = _donor_with_ad_block()
+
+    def frames_post_ad(base_t: float, donor_t: float) -> bool:
+        return abs((donor_t - base_t) - 20.0) <= 1.0 and 38.0 <= base_t <= 46.0
+
+    hit = _find_forward_surplus(
+        base,
+        donor,
+        base_time=40.0,
+        offset=0.0,
+        speed=1.0,
+        half_window=6.0,
+        period=1.0,
+        min_score=0.25,
+        min_surplus_seconds=6.0,
+        max_surplus_seconds=80.0,
+        break_score=0.18,
+        donor_start=0.0,
+        donor_end=99.0,
+        frame_confirm=frames_post_ad,
+        confirm_seconds=6.0,
+        hop_seconds=2.0,
+    )
+    assert hit is not None
+    gap_start, gap_end, new_off, _score = hit
+    assert gap_start == pytest.approx(ad0, abs=2.0)
+    assert gap_end == pytest.approx(ad1, abs=2.0)
+    assert new_off == pytest.approx(20.0, abs=1.0)
 
 
 def test_curve_walk_still_finds_ad_when_speed_refine_cannot_help() -> None:

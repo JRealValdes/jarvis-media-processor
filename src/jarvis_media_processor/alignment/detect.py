@@ -17,8 +17,12 @@ from jarvis_media_processor.alignment.curve_walk import CurveLock
 from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
     ChunkTimingHint,
+    bridge_missing_base_gaps,
+    bridge_surplus_donor_gaps,
+    close_donor_continuous_seams,
     estimate_alignment,
     estimate_alignment_visual_first,
+    subtract_base_intervals,
 )
 from jarvis_media_processor.alignment.evidence import (
     TimePair,
@@ -170,12 +174,103 @@ def detect_alignment_from_artifacts(
             speed_min=speed_min,
             speed_max=speed_max,
         )
-    if unrelated_donor_intervals or missing_base_intervals:
+    excluded_for_bridge = list(excluded)
+    bridges, recovered_surplus, bridge_notes = bridge_surplus_donor_gaps(
+        doc.segments,
+        excluded_for_bridge,
+        base_duration=base_audio.duration_seconds,
+    )
+    if bridges:
+        doc.segments = sorted(
+            list(doc.segments) + bridges,
+            key=lambda s: (s.base_start, s.donor_start),
+        )
+        doc.notes = list(doc.notes) + bridge_notes
+        evidence = dict(doc.evidence)
+        evidence["bridged_surplus_chunks"] = len(bridges)
+        doc.evidence = evidence
+        for note in bridge_notes:
+            logger.info("%s", note)
+
+    recovered_set = {(round(a, 3), round(b, 3)) for a, b in recovered_surplus}
+
+    def _is_recovered(item: TimelineInterval) -> bool:
+        key = (round(float(item.start), 3), round(float(item.end), 3))
+        return key in recovered_set
+
+    unrelated_kept = [
+        item
+        for item in (unrelated_donor_intervals or [])
+        if item.timeline != "donor" or not _is_recovered(item)
+    ]
+    # Trim missing by surplus bridges first, then try neighbor fill of residuals.
+    missing_after_surplus = subtract_base_intervals(
+        list(missing_base_intervals or []),
+        [(seg.base_start, seg.base_end) for seg in bridges],
+    )
+    missing_tuples = [
+        (float(item.start), float(item.end))
+        for item in missing_after_surplus
+        if item.timeline == "base"
+    ]
+    missing_bridges, recovered_missing, missing_notes = bridge_missing_base_gaps(
+        doc.segments,
+        missing_tuples,
+        donor_duration=donor_audio.duration_seconds,
+    )
+    if missing_bridges:
+        doc.segments = sorted(
+            list(doc.segments) + missing_bridges,
+            key=lambda s: (s.base_start, s.donor_start),
+        )
+        doc.notes = list(doc.notes) + missing_notes
+        evidence = dict(doc.evidence)
+        evidence["bridged_missing_chunks"] = len(missing_bridges)
+        doc.evidence = evidence
+        for note in missing_notes:
+            logger.info("%s", note)
+    elif missing_notes:
+        doc.notes = list(doc.notes) + missing_notes
+
+    # Donor-continuous base seams: slow both neighbors by one common factor.
+    closed_segments, seam_notes = close_donor_continuous_seams(doc.segments)
+    seam_closed = sum(1 for n in seam_notes if n.startswith("Closed donor-continuous seam"))
+    if seam_closed:
+        doc.segments = closed_segments
+        doc.notes = list(doc.notes) + seam_notes
+        evidence = dict(doc.evidence)
+        evidence["closed_donor_continuous_seams"] = seam_closed
+        doc.evidence = evidence
+        for note in seam_notes:
+            if note.startswith("Closed donor-continuous seam"):
+                logger.info("%s", note)
+    elif seam_notes:
+        doc.notes = list(doc.notes) + seam_notes
+
+    # Any residual missing must not overlap Spanish placements (incl. bridges).
+    missing_kept = subtract_base_intervals(
+        missing_after_surplus,
+        [(seg.base_start, seg.base_end) for seg in doc.segments],
+    )
+    if unrelated_kept or missing_kept:
         apply_unrelated_to_document(
             doc,
-            unrelated_donor_intervals or [],
-            missing_base=missing_base_intervals,
+            unrelated_kept,
+            missing_base=missing_kept or None,
         )
+    elif (
+        (bridges or missing_bridges or seam_closed)
+        and not unrelated_kept
+        and not missing_kept
+    ):
+        # All structural edits recovered — clear empty lists on the doc.
+        doc.unrelated_donor_intervals = []
+        doc.missing_base_intervals = []
+        evidence = dict(doc.evidence)
+        evidence["unrelated_donor_spans"] = 0
+        evidence["unrelated_donor_seconds"] = 0
+        evidence["missing_base_spans"] = 0
+        doc.evidence = evidence
     if refine_audio_offset and (visual_matches or activity_pairs):
         doc, refinement = refine_alignment_audio_offset(
             doc,
@@ -205,6 +300,7 @@ def _activity_pairs_from_report(
     list[TimelineInterval],
     list[TimelineInterval],
     list[CurveLock],
+    list[str],
 ]:
     cfg = settings or get_settings()
     period = float(report.params.get("activity_sample_period", 1.0) or 1.0)
@@ -219,7 +315,7 @@ def _activity_pairs_from_report(
         sample_period=period,
     )
     if base_env is None or donor_env is None:
-        return [], None, [], [], []
+        return [], None, [], [], [], []
     frame_confirm = None
     if report.base_frames and report.donor_frames:
         frame_confirm = make_frame_confirmer(
@@ -242,7 +338,8 @@ def _activity_pairs_from_report(
     )
     unrelated = walk.unrelated_donor_intervals
     missing_base = walk.missing_base_intervals
-    for note in walk.notes:
+    walk_notes = list(walk.notes)
+    for note in walk_notes:
         logger.info("Curve walk: %s", note)
 
     # Fit activity sync per contiguous donor chunk outside ads.
@@ -295,7 +392,7 @@ def _activity_pairs_from_report(
         len(missing_base),
         len(chunks),
     )
-    return pairs, sync, unrelated, missing_base, list(walk.locks)
+    return pairs, sync, unrelated, missing_base, list(walk.locks), walk_notes
 
 
 def detect_alignment(
@@ -332,6 +429,7 @@ def detect_alignment(
     unrelated_donor: list[TimelineInterval] = []
     missing_base: list[TimelineInterval] = []
     walk_locks: list[CurveLock] = []
+    walk_notes: list[str] = []
     if use_video:
         try:
             report = match_media_visuals(base, donor, work / "visual", settings=cfg)
@@ -342,6 +440,7 @@ def detect_alignment(
                 unrelated_donor,
                 missing_base,
                 walk_locks,
+                walk_notes,
             ) = _activity_pairs_from_report(report, settings=cfg)
             if activity_sync is not None:
                 (work / "activity_sync.json").write_text(
@@ -368,6 +467,7 @@ def detect_alignment(
                                 }
                                 for item in missing_base
                             ],
+                            "curve_walk_notes": walk_notes,
                         },
                         indent=2,
                     )
@@ -398,6 +498,21 @@ def detect_alignment(
         audio_refine_min_score=cfg.alignment_audio_refine_min_score,
         refine_audio_offset=bool(visual_matches or activity_pairs),
     )
+    if walk_notes:
+        # Keep decision trail on the alignment doc (also in activity_sync.json).
+        decision_notes = [
+            n
+            for n in walk_notes
+            if n.startswith("Break decision")
+            or n.startswith("Rejected surplus")
+            or n.startswith("Surplus donor")
+            or n.startswith("Missing base")
+            or n.startswith("Speed refine")
+        ]
+        doc.notes = list(doc.notes) + decision_notes
+        evidence = dict(doc.evidence)
+        evidence["curve_walk_note_count"] = len(walk_notes)
+        doc.evidence = evidence
 
     out = work / "alignment.json"
     out.write_text(doc.model_dump_json(indent=2) + "\n", encoding="utf-8")

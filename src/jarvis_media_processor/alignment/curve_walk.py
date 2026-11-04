@@ -909,13 +909,30 @@ def walk_activity_curves(
             hop_seconds=hop,
             frame_confirm=frame_confirm,
         )
-        # Picture-supported surplus is a donor insert; drop competing missing.
-        if (
-            missing_hit is not None
-            and surplus_hit is not None
-            and frame_confirm is not None
-        ):
-            missing_hit = None
+        # Continuity veto: a mild speed refine that still tracks through the
+        # would-be surplus gap means lock-loss / retime, not a donor insert.
+        if surplus_hit is not None and speed_hit is not None:
+            _gs, _ge, _no, _rs = surplus_hit
+            if not _donor_gap_is_unrelated(
+                base,
+                donor,
+                base_time=float(break_base),
+                donor_gap_start=float(_gs),
+                donor_gap_end=float(_ge),
+                speed=float(speed_hit.speed),
+                half_window=half_window,
+                period=period,
+                break_score=break_score,
+            ):
+                notes.append(
+                    f"Rejected surplus {_gs:.1f}-{_ge:.1f}s at base={break_base:.1f}s: "
+                    f"gap still tracks under speed refine {speed_hit.speed:.4f} "
+                    f"(resume was {_rs:.3f})."
+                )
+                surplus_hit = None
+        # Do NOT drop competing missing when framed surplus fires — that bias
+        # invented false ads on retimed film (surplus won; base hole went
+        # unexplained). Keep both in ranking; surplus must win clearly.
         # Speed refine vs missing: short framed "missing" jumps on cross-encode
         # film are usually lock noise while a mild speed still explains the
         # break (e.g. ~15s alias score ~0.79 beating speed ~0.64). Real mid
@@ -929,19 +946,29 @@ def walk_activity_curves(
             elif frame_confirm is not None and float(missing_hit[1]) >= 0.65:
                 speed_hit = None
 
-
-        # Rank hypotheses: (kind, score, payload). Human order at a break:
-        # speed refine (no jump) vs surplus donor vs missing base. Speed gets a
-        # small edge when both fire without picture-backed jumps; surplus must
-        # not win on a tiny score edge alone.
+        # Rank hypotheses: (kind, score, payload). Speed gets a small edge.
+        # Penalize surplus only when a speed refine also competes (lock-loss /
+        # retime) — do NOT penalize surplus vs missing, or true mid-roll ads
+        # lose ties and get mislabeled as missing_base + truncated surplus.
         ranked: list[tuple[str, float, object]] = []
         if speed_hit is not None:
             ranked.append(("speed", float(speed_hit.score) + 0.08, speed_hit))
+        surplus_penalty = 0.08 if speed_hit is not None else 0.0
         if surplus_hit is not None:
-            ranked.append(("surplus_fwd", float(surplus_hit[3]), surplus_hit))
+            ranked.append(
+                (
+                    "surplus_fwd",
+                    float(surplus_hit[3]) - surplus_penalty,
+                    surplus_hit,
+                )
+            )
         if surplus is not None:
             ranked.append(
-                ("surplus_search", float(surplus[1]), (surplus, surplus_anchor))
+                (
+                    "surplus_search",
+                    float(surplus[1]) - surplus_penalty,
+                    (surplus, surplus_anchor),
+                )
             )
         if missing_hit is not None:
             ranked.append(("missing", float(missing_hit[1]), missing_hit))
@@ -956,6 +983,11 @@ def walk_activity_curves(
             continue
 
         kind, _score, payload = max(ranked, key=lambda item: item[1])
+        cand_summary = ", ".join(f"{k}={s:.3f}" for k, s, _ in ranked)
+        notes.append(
+            f"Break decision at base={break_base:.1f}s donor≈{break_donor:.1f}s → "
+            f"{kind} (score={_score:.3f}; candidates: {cand_summary})."
+        )
 
         if kind == "speed":
             new_lock = payload  # type: ignore[assignment]
@@ -1224,8 +1256,48 @@ def _find_forward_surplus(
             break_score=break_score,
         ):
             continue
+        # Multi-signal insert bar: if frames still support the *pre-jump*
+        # continuous map through the gap, this is lock-loss / same scene — not
+        # a donor-only insert. Activity-alone surplus is rejected.
+        if frame_confirm is not None and _continuous_map_supported_by_frames(
+            frame_confirm,
+            donor_gap_start=gap_start,
+            donor_gap_end=gap_end,
+            speed=speed,
+            offset=offset,
+            period=period,
+        ):
+            continue
         return gap_start, gap_end, best_off, best_sc
     return None
+
+
+def _continuous_map_supported_by_frames(
+    frame_confirm: Callable[[float, float], bool],
+    *,
+    donor_gap_start: float,
+    donor_gap_end: float,
+    speed: float,
+    offset: float,
+    period: float,
+    min_hits: int = 2,
+) -> bool:
+    """True when pHash still agrees along the pre-jump map through a surplus gap."""
+    span = float(donor_gap_end) - float(donor_gap_start)
+    if span <= 0:
+        return False
+    model_speed = speed if speed > 0 else 1.0
+    n_probes = max(3, int(span / max(period, 2.0)))
+    n_probes = min(n_probes, 12)
+    hits = 0
+    for i in range(1, n_probes + 1):
+        donor_t = float(donor_gap_start) + span * (i / (n_probes + 1))
+        base_t = (donor_t - float(offset)) / max(model_speed, 1e-6)
+        if frame_confirm(float(base_t), float(donor_t)):
+            hits += 1
+            if hits >= min_hits:
+                return True
+    return False
 
 
 def _donor_gap_is_unrelated(

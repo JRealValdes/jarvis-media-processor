@@ -12,10 +12,42 @@ from jarvis_media_processor.report.validate import (
     alignment_status_findings,
     base_coverage,
     duration_mismatch_finding,
+    format_abrupt_coverage_summary,
     low_confidence_findings,
     placement_overlaps,
     skipped_segment_findings,
 )
+
+
+def _resolve_donor_duration(
+    alignment: AlignmentDocument,
+    reconstruction: ReconstructionResult,
+) -> float | None:
+    """Best-effort donor timeline length for utilization ratio."""
+    donor_path = alignment.donor_path or reconstruction.donor_path
+    if donor_path is not None:
+        path = Path(donor_path)
+        if path.is_file():
+            try:
+                from jarvis_media_processor.media.inspect import inspect_media
+
+                return float(inspect_media(path).duration_seconds)
+            except Exception:  # noqa: BLE001 - fall back to timeline hull
+                pass
+    ends: list[float] = [
+        float(seg.donor_end) for seg in alignment.segments if seg.donor_end > 0
+    ]
+    ends.extend(
+        float(item.end)
+        for item in alignment.unrelated_donor_intervals
+        if item.timeline == "donor" and item.end > 0
+    )
+    ends.extend(
+        float(p.donor_end)
+        for p in reconstruction.placements
+        if p.donor_end > 0
+    )
+    return max(ends) if ends else None
 
 
 def build_processing_report(
@@ -24,6 +56,7 @@ def build_processing_report(
     *,
     base_duration: float,
     settings: Settings | None = None,
+    donor_duration: float | None = None,
 ) -> ProcessingReport:
     """Validate sync/reconstruction and return a serializable processing report."""
     cfg = settings or get_settings()
@@ -42,11 +75,17 @@ def build_processing_report(
         for item in alignment.missing_base_intervals
         if item.timeline == "base"
     ]
+    donor_dur = (
+        float(donor_duration)
+        if donor_duration is not None
+        else _resolve_donor_duration(alignment, reconstruction)
+    )
     coverage, gap_findings = base_coverage(
         reconstruction.placements,
         base_duration=base_duration,
         explained_gaps=explained,
         min_gap_seconds=cfg.report_min_gap_seconds,
+        donor_duration=donor_dur,
     )
     findings.extend(gap_findings)
 
@@ -74,6 +113,24 @@ def build_processing_report(
     # Surplus-only runs should not force review by themselves (info findings).
 
     notes = list(reconstruction.notes)
+    notes.append(
+        f"Coverage: base {coverage.coverage_ratio:.1%} covered "
+        f"({coverage.covered_seconds:.1f}/{coverage.base_duration_seconds:.1f}s)"
+        + (
+            f"; donor {coverage.donor_utilization_ratio:.1%} used "
+            f"({coverage.donor_used_seconds:.1f}/{coverage.donor_duration_seconds:.1f}s)"
+            if coverage.donor_utilization_ratio is not None
+            and coverage.donor_used_seconds is not None
+            and coverage.donor_duration_seconds is not None
+            else ""
+        )
+        + "."
+    )
+    silence_summary = format_abrupt_coverage_summary(
+        findings,
+        min_seconds=cfg.report_min_gap_seconds,
+    )
+    notes.extend(silence_summary.splitlines())
     notes.append(
         "Manual review rules: any ERROR finding; FAILED strategy; "
         f"global confidence < {cfg.report_min_global_confidence:.2f}; "
