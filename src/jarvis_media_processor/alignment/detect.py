@@ -17,7 +17,9 @@ from jarvis_media_processor.alignment.curve_walk import CurveLock
 from jarvis_media_processor.alignment.audio_refine import refine_alignment_audio_offset
 from jarvis_media_processor.alignment.estimate import (
     ChunkTimingHint,
+    bridge_missing_base_gaps,
     bridge_surplus_donor_gaps,
+    close_donor_continuous_seams,
     estimate_alignment,
     estimate_alignment_visual_first,
     subtract_base_intervals,
@@ -201,9 +203,54 @@ def detect_alignment_from_artifacts(
         for item in (unrelated_donor_intervals or [])
         if item.timeline != "donor" or not _is_recovered(item)
     ]
-    missing_kept = subtract_base_intervals(
+    # Trim missing by surplus bridges first, then try neighbor fill of residuals.
+    missing_after_surplus = subtract_base_intervals(
         list(missing_base_intervals or []),
         [(seg.base_start, seg.base_end) for seg in bridges],
+    )
+    missing_tuples = [
+        (float(item.start), float(item.end))
+        for item in missing_after_surplus
+        if item.timeline == "base"
+    ]
+    missing_bridges, recovered_missing, missing_notes = bridge_missing_base_gaps(
+        doc.segments,
+        missing_tuples,
+        donor_duration=donor_audio.duration_seconds,
+    )
+    if missing_bridges:
+        doc.segments = sorted(
+            list(doc.segments) + missing_bridges,
+            key=lambda s: (s.base_start, s.donor_start),
+        )
+        doc.notes = list(doc.notes) + missing_notes
+        evidence = dict(doc.evidence)
+        evidence["bridged_missing_chunks"] = len(missing_bridges)
+        doc.evidence = evidence
+        for note in missing_notes:
+            logger.info("%s", note)
+    elif missing_notes:
+        doc.notes = list(doc.notes) + missing_notes
+
+    # Donor-continuous base seams: slow both neighbors by one common factor.
+    closed_segments, seam_notes = close_donor_continuous_seams(doc.segments)
+    seam_closed = sum(1 for n in seam_notes if n.startswith("Closed donor-continuous seam"))
+    if seam_closed:
+        doc.segments = closed_segments
+        doc.notes = list(doc.notes) + seam_notes
+        evidence = dict(doc.evidence)
+        evidence["closed_donor_continuous_seams"] = seam_closed
+        doc.evidence = evidence
+        for note in seam_notes:
+            if note.startswith("Closed donor-continuous seam"):
+                logger.info("%s", note)
+    elif seam_notes:
+        doc.notes = list(doc.notes) + seam_notes
+
+    # Any residual missing must not overlap Spanish placements (incl. bridges).
+    missing_kept = subtract_base_intervals(
+        missing_after_surplus,
+        [(seg.base_start, seg.base_end) for seg in doc.segments],
     )
     if unrelated_kept or missing_kept:
         apply_unrelated_to_document(
@@ -211,8 +258,12 @@ def detect_alignment_from_artifacts(
             unrelated_kept,
             missing_base=missing_kept or None,
         )
-    elif bridges and not unrelated_kept and not missing_kept:
-        # All surplus was bridged and no missing-base left — still record empty.
+    elif (
+        (bridges or missing_bridges or seam_closed)
+        and not unrelated_kept
+        and not missing_kept
+    ):
+        # All structural edits recovered — clear empty lists on the doc.
         doc.unrelated_donor_intervals = []
         doc.missing_base_intervals = []
         evidence = dict(doc.evidence)

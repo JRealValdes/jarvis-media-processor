@@ -16,7 +16,9 @@ from jarvis_media_processor.alignment import (
     estimate_alignment_visual_first,
 )
 from jarvis_media_processor.alignment.estimate import (
+    bridge_missing_base_gaps,
     bridge_surplus_donor_gaps,
+    close_donor_continuous_seams,
     fit_speed_offset,
     subtract_base_intervals,
 )
@@ -688,6 +690,186 @@ def test_bridge_surplus_when_neighbor_affines_agree() -> None:
     # Overlap with the bridge is removed; a short tail after the bridge may remain.
     assert all(item.end > bridge.base_end - 1e-6 or item.start >= bridge.base_end for item in trimmed)
     assert not any(item.start < bridge.base_end - 1.0 and item.end > bridge.base_start + 1.0 for item in trimmed if item.end - item.start > 5)
+
+
+def test_bridge_missing_base_when_neighbors_agree_and_duration_ok() -> None:
+    """False missing_base between keeps is stitched with compatible donor length."""
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=100.0,
+        donor_start=0.0,
+        donor_end=96.0,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    right = AlignmentSegment(
+        base_start=120.0,
+        base_end=220.0,
+        donor_start=115.2,
+        donor_end=211.2,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    bridges, recovered, notes = bridge_missing_base_gaps(
+        [left, right],
+        [(100.0, 120.0)],
+        donor_duration=300.0,
+    )
+    assert len(bridges) == 1
+    assert recovered == [(100.0, 120.0)]
+    assert bridges[0].donor_start == pytest.approx(96.0, abs=0.5)
+    assert bridges[0].donor_end == pytest.approx(115.2, abs=0.5)
+    assert any("Bridged missing-base" in n for n in notes)
+
+
+def test_bridge_missing_base_rejects_incompatible_donor_duration() -> None:
+    """A 10s base hole must not swallow ~20s of donor under the neighbor map."""
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=100.0,
+        donor_start=0.0,
+        donor_end=100.0,
+        speed=1.0,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    # Right neighbor offset jumps so mapped donor span is ~twice the hole.
+    right = AlignmentSegment(
+        base_start=110.0,
+        base_end=200.0,
+        donor_start=130.0,
+        donor_end=220.0,
+        speed=1.0,
+        offset_seconds=20.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    bridges, recovered, notes = bridge_missing_base_gaps(
+        [left, right],
+        [(100.0, 110.0)],
+        donor_duration=300.0,
+    )
+    # Either model-disagree rejects before duration, or duration skip — no bridge.
+    assert bridges == []
+    assert recovered == []
+
+
+def test_subtract_missing_clears_spans_already_covered_by_segments() -> None:
+    """EN-fill must not keep missing labels that sit inside Spanish placements."""
+    missing = [
+        TimelineInterval(
+            start=6338.0,
+            end=6348.0,
+            timeline="base",
+            reason="curve_break_missing_base",
+        )
+    ]
+    trimmed = subtract_base_intervals(missing, [(6338.6, 7272.0)])
+    assert trimmed == [] or all(item.end - item.start < 1.0 for item in trimmed)
+
+
+def test_close_donor_continuous_seam_common_speed_factor() -> None:
+    """Continuous donor + base gap: slow both neighbors by the same factor."""
+    # Long right keep absorbs most of the 0.5s hole; join lands nearer the short left.
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=100.0,
+        donor_start=0.0,
+        donor_end=96.0,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    right = AlignmentSegment(
+        base_start=100.5,
+        base_end=300.5,
+        donor_start=96.0,
+        donor_end=288.0,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    gap = 0.5
+    b_l, b_r = 100.0, 200.0
+    expected_f = (b_l + b_r) / (b_l + b_r + gap)
+    out, notes = close_donor_continuous_seams([left, right])
+    assert len(out) == 2
+    assert out[0].base_end == pytest.approx(out[1].base_start)
+    assert out[0].base_end - out[0].base_start == pytest.approx(b_l / expected_f)
+    assert out[1].base_end - out[1].base_start == pytest.approx(b_r / expected_f)
+    assert out[0].speed == pytest.approx(0.96 * expected_f)
+    assert out[1].speed == pytest.approx(0.96 * expected_f)
+    # Absolute absorption proportional to duration (right ≈ 2× left).
+    left_absorb = out[0].base_end - left.base_end
+    right_absorb = right.base_start - out[1].base_start
+    assert left_absorb == pytest.approx(gap * b_l / (b_l + b_r))
+    assert right_absorb == pytest.approx(gap * b_r / (b_l + b_r))
+    assert left_absorb < right_absorb
+    assert any("Closed donor-continuous seam" in n for n in notes)
+
+
+def test_close_donor_continuous_seam_rejects_excessive_slowdown() -> None:
+    """A large hole between short keeps would need too much speed reduction."""
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=10.0,
+        donor_start=0.0,
+        donor_end=10.0,
+        speed=1.0,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    right = AlignmentSegment(
+        base_start=20.0,
+        base_end=30.0,
+        donor_start=10.0,
+        donor_end=20.0,
+        speed=1.0,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    # f = 20/30 ≈ 0.667 ≪ 0.98
+    out, notes = close_donor_continuous_seams([left, right])
+    assert out[0].base_end == pytest.approx(10.0)
+    assert out[1].base_start == pytest.approx(20.0)
+    assert any("Skipped seam close" in n for n in notes)
+
+
+def test_close_donor_continuous_seam_ignores_donor_discontinuity() -> None:
+    """Unused donor between keeps is not a seam-stretch case."""
+    left = AlignmentSegment(
+        base_start=0.0,
+        base_end=100.0,
+        donor_start=0.0,
+        donor_end=96.0,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    right = AlignmentSegment(
+        base_start=100.5,
+        base_end=200.5,
+        donor_start=110.0,
+        donor_end=206.0,
+        speed=0.96,
+        offset_seconds=0.0,
+        confidence=0.9,
+        reliable=True,
+    )
+    out, notes = close_donor_continuous_seams([left, right])
+    assert out[0].base_end == pytest.approx(100.0)
+    assert out[1].base_start == pytest.approx(100.5)
+    assert not any("Closed donor-continuous seam" in n for n in notes)
 
 
 def test_bridge_surplus_skipped_when_neighbor_affines_disagree() -> None:

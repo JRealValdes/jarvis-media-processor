@@ -179,8 +179,16 @@ def fill_missing_base_audio(
         length = end_i - start_i
         if length <= 0:
             continue
-        # Replace (do not add) so we don't mix with residual donor bleed.
-        out[:, start_i:end_i] = chunk[:, :length]
+        # Never overwrite existing Spanish placements: only fill near-silent
+        # samples (false missing residuals used to stomp donor audio with EN).
+        dest = out[:, start_i:end_i]
+        occupied = np.max(np.abs(dest), axis=0) > 1e-4
+        if bool(np.all(occupied)):
+            continue
+        write = chunk[:, :length].copy()
+        if bool(np.any(occupied)):
+            write[:, occupied] = dest[:, occupied]
+        out[:, start_i:end_i] = write
     peak = np.max(np.abs(out)) if out.size else 0.0
     if peak > 1.0:
         out = out / peak
