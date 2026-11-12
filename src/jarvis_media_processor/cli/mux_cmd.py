@@ -10,7 +10,12 @@ import typer
 from jarvis_media_processor.audio import FFmpegNotFoundError
 from jarvis_media_processor.config import get_settings
 from jarvis_media_processor.media import MediaFileNotFoundError
-from jarvis_media_processor.output import OutputPathError, mux_mkv
+from jarvis_media_processor.output import (
+    OutputPathError,
+    SubtitleSpecError,
+    mux_mkv,
+    parse_subtitle_spec,
+)
 
 
 def mux_command(
@@ -31,10 +36,29 @@ def mux_command(
         str,
         typer.Option("--donor-title", help="Track title for donor audio."),
     ] = "Spanish (reconstructed)",
+    subtitle: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--subtitle",
+            "-s",
+            help=(
+                "Soft subtitle track as LANG=PATH or LANG:TITLE=PATH (repeatable). "
+                "Mapped as a selectable MKV stream; never burned into video."
+            ),
+        ),
+    ] = None,
+    copy_base_subtitles: Annotated[
+        bool,
+        typer.Option(
+            "--copy-base-subtitles",
+            help="Also copy existing subtitle streams from the base file.",
+        ),
+    ] = False,
 ) -> None:
     """Mux base A/V (stream copy) with reconstructed donor audio into an MKV."""
     settings = get_settings()
     try:
+        tracks = [parse_subtitle_spec(spec) for spec in (subtitle or [])]
         out = mux_mkv(
             base,
             donor_audio,
@@ -42,8 +66,16 @@ def mux_command(
             settings=settings,
             donor_language=donor_language,
             donor_title=donor_title,
+            subtitles=tracks,
+            copy_base_subtitles=copy_base_subtitles,
         )
-    except (MediaFileNotFoundError, OutputPathError, FFmpegNotFoundError, RuntimeError) as exc:
+    except (
+        MediaFileNotFoundError,
+        OutputPathError,
+        SubtitleSpecError,
+        FFmpegNotFoundError,
+        RuntimeError,
+    ) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
