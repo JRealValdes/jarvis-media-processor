@@ -109,7 +109,7 @@ uv run jmp reconstruct path/to/donor.mkv .jmp/alignment/alignment.json --base-du
 Typical path from a base/donor pair to a playable MKV:
 
 ```text
-align → reconstruct → fine-warp → mux
+align → reconstruct → fine-warp → mux → [optimize if oversized]
 ```
 
 ```bash
@@ -128,10 +128,13 @@ Submit a full graft as a persisted job (status under `JMP_WORK_DIR/jobs/`):
 
 ```bash
 uv run jmp job submit path/to/base.mkv path/to/donor.mkv -o out.mkv
+uv run jmp job submit path/to/base.mkv path/to/donor.mkv -o out.mkv --no-optimize
 uv run jmp job status <job-id>
 uv run jmp job list
 uv run jmp job cancel <job-id>
 ```
+
+After mux, jobs may run **`optimize`** when the output is over the size threshold (default 6 GiB) and the video is not already an efficient HEVC/AV1/VP9 encode. Disable per job with `--no-optimize`, or globally with `JMP_JOBS_OPTIMIZE_AFTER_MUX=false`.
 
 ### Batch / folder workflows
 
@@ -229,6 +232,10 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 | `JMP_OPTIMIZE_X265_PRESET` | `medium` | libx265 preset |
 | `JMP_OPTIMIZE_AUDIO_CODEC` | `libopus` | Audio encoder for non-`remux` profiles |
 | `JMP_OPTIMIZE_AUDIO_BITRATE` | `192k` | Audio bitrate for those profiles |
+| `JMP_JOBS_OPTIMIZE_AFTER_MUX` | `true` | Consider post-mux optimize in graft jobs |
+| `JMP_OPTIMIZE_SIZE_THRESHOLD_BYTES` | `6442450944` | Size gate (6 GiB) before post-mux optimize |
+| `JMP_OPTIMIZE_SKIP_EFFICIENT_MAX_BITRATE_BPS` | `15000000` | Skip if already HEVC/AV1/VP9 at/below this bitrate |
+| `JMP_JOBS_OPTIMIZE_PROFILE` | `archive` | Profile used by the post-mux job step |
 | `JMP_FINE_WARP_*` | (see Settings) | Dense residual lag field after reconstruct — [docs/fine-warp.md](docs/fine-warp.md) |
 
 ## Package layout

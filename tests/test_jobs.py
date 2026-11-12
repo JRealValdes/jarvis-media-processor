@@ -96,8 +96,12 @@ def test_default_idempotency_key_stable(tmp_path: Path) -> None:
     k1 = default_idempotency_key(a, b, o, use_video=True, fine_warp=True)
     k2 = default_idempotency_key(a, b, o, use_video=True, fine_warp=True)
     k3 = default_idempotency_key(a, b, o, use_video=False, fine_warp=True)
+    k4 = default_idempotency_key(
+        a, b, o, use_video=True, fine_warp=True, optimize_after_mux=False
+    )
     assert k1 == k2
     assert k1 != k3
+    assert k1 != k4
 
 
 def test_pipeline_cancel_between_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,5 +225,83 @@ def test_pipeline_success_with_mocks(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert result.artifacts["output_mkv"] == out
     assert result.artifacts["fine_warped_wav"] == fine_wav
     assert out.is_file()
+    assert any("optimize_decision:" in n for n in result.notes)
     reloaded = store.load(record.id)
     assert reloaded.state == JobState.SUCCEEDED
+
+
+def test_pipeline_optimize_after_mux_when_policy_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jarvis_media_processor.config import Settings
+    from jarvis_media_processor.output.optimize import OptimizeDecision
+
+    store = JobStore(tmp_path / "jobs")
+    base = tmp_path / "base.mkv"
+    donor = tmp_path / "donor.mkv"
+    out = tmp_path / "out.mkv"
+    base.write_bytes(b"base")
+    donor.write_bytes(b"donor")
+
+    record = store.create(
+        JobParams(
+            base_path=base,
+            donor_path=donor,
+            output_path=out,
+            fine_warp=False,
+            optimize_after_mux=True,
+            idempotency_key=None,
+        )
+    )
+
+    inspect = MagicMock()
+    inspect.duration_seconds = 12.5
+    monkeypatch.setattr(
+        "jarvis_media_processor.jobs.pipeline.inspect_media",
+        lambda *a, **k: inspect,
+    )
+    alignment = MagicMock()
+    alignment.model_dump_json.return_value = "{}"
+    monkeypatch.setattr(
+        "jarvis_media_processor.jobs.pipeline.detect_alignment",
+        lambda *a, **k: alignment,
+    )
+    recon_wav = tmp_path / "jobs" / record.id / "workspace" / "reconstruct" / "d.wav"
+    recon_wav.parent.mkdir(parents=True, exist_ok=True)
+    recon_wav.write_bytes(b"wav")
+    recon = MagicMock()
+    recon.output_wav = recon_wav
+    monkeypatch.setattr(
+        "jarvis_media_processor.jobs.pipeline.reconstruct_donor_audio",
+        lambda *a, **k: recon,
+    )
+
+    def fake_mux(*_a: object, **_k: object) -> Path:
+        out.write_bytes(b"muxed-large")
+        return out
+
+    monkeypatch.setattr("jarvis_media_processor.jobs.pipeline.mux_mkv", fake_mux)
+    monkeypatch.setattr(
+        "jarvis_media_processor.jobs.pipeline.should_optimize_output",
+        lambda *_a, **_k: OptimizeDecision(True, "test force optimize"),
+    )
+
+    def fake_optimize(source: Path, dest: Path, **_k: object) -> Path:
+        Path(dest).write_bytes(b"optimized")
+        return Path(dest)
+
+    monkeypatch.setattr(
+        "jarvis_media_processor.jobs.pipeline.optimize_mkv",
+        fake_optimize,
+    )
+
+    settings = Settings(
+        _env_file=None,
+        jobs_optimize_after_mux=True,
+        jobs_optimize_profile="archive",
+        optimize_size_threshold_bytes=1,
+    )
+    result = run_graft_pipeline(record, store, settings=settings)
+    assert result.state == JobState.SUCCEEDED
+    assert out.read_bytes() == b"optimized"
+    assert any("optimize applied" in n for n in result.notes)

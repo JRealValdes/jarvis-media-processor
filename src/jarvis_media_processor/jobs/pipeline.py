@@ -12,12 +12,18 @@ from jarvis_media_processor.jobs.models import JobError, JobProgress, JobRecord,
 from jarvis_media_processor.jobs.store import JobStore
 from jarvis_media_processor.media.inspect import inspect_media
 from jarvis_media_processor.output.mux import mux_mkv, validate_output_path
+from jarvis_media_processor.output.optimize import (
+    OptimizeProfile,
+    optimize_mkv,
+    should_optimize_output,
+)
 from jarvis_media_processor.reconstruct.fine_warp_pipeline import fine_warp_reconstructed_audio
 from jarvis_media_processor.reconstruct.pipeline import reconstruct_donor_audio
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[JobProgress], None]
+EmitFn = Callable[[float, str, str], None]
 
 
 class JobCancelled(Exception):
@@ -46,9 +52,10 @@ def run_graft_pipeline(
     on_progress: ProgressCallback | None = None,
     cleanup_workspace_on_success: bool = False,
 ) -> JobRecord:
-    """Run align → reconstruct → [fine-warp] → mux for ``record``.
+    """Run align → reconstruct → [fine-warp] → mux → [optimize] for ``record``.
 
     Updates the store after each stage. Sources are never overwritten.
+    Post-mux optimize runs only when enabled and size/codec gates say it helps.
     """
     cfg = settings or get_settings()
     job_id = record.id
@@ -157,7 +164,7 @@ def run_graft_pipeline(
             record.notes.append("fine_warp skipped by job params")
 
         _check_cancel(store, job_id)
-        emit(90.0, "mux", "Muxing output MKV")
+        emit(85.0, "mux", "Muxing output MKV")
         out = mux_mkv(
             params.base_path,
             donor_audio,
@@ -168,6 +175,16 @@ def run_graft_pipeline(
         )
         record.artifacts["output_mkv"] = out
         store.save(record)
+
+        _check_cancel(store, job_id)
+        out = _maybe_optimize_after_mux(
+            record,
+            store,
+            cfg,
+            work=work,
+            output=out,
+            emit=emit,
+        )
 
         if cleanup_workspace_on_success:
             _cleanup_intermediates(work)
@@ -211,6 +228,59 @@ def run_graft_pipeline(
         return record
 
 
+def _maybe_optimize_after_mux(
+    record: JobRecord,
+    store: JobStore,
+    cfg: Settings,
+    *,
+    work: Path,
+    output: Path,
+    emit: EmitFn,
+) -> Path:
+    """Run archive optimize when size/codec policy says it is worth it."""
+    params = record.params
+    enabled = (
+        cfg.jobs_optimize_after_mux
+        if params.optimize_after_mux is None
+        else params.optimize_after_mux
+    )
+    mux_info = inspect_media(output, settings=cfg)
+    decision = should_optimize_output(
+        output,
+        mux_info,
+        enabled=enabled,
+        size_threshold_bytes=cfg.optimize_size_threshold_bytes,
+        skip_efficient_max_bitrate_bps=cfg.optimize_skip_efficient_max_bitrate_bps,
+    )
+    record.notes.append(f"optimize_decision: {decision.reason}")
+    store.save(record)
+
+    if not decision.should_run:
+        return output
+
+    profile = OptimizeProfile(str(cfg.jobs_optimize_profile).strip().lower())
+    size_before = output.stat().st_size
+    emit(92.0, "optimize", f"Optimizing oversized output ({profile.value})")
+    opt_tmp = work / "optimized.mkv"
+    optimize_mkv(
+        output,
+        opt_tmp,
+        profile=profile,
+        settings=cfg,
+    )
+    output.unlink(missing_ok=True)
+    opt_tmp.replace(params.output_path)
+    final = Path(params.output_path)
+    size_after = final.stat().st_size if final.is_file() else 0
+    record.artifacts["output_mkv"] = final
+    record.notes.append(
+        f"optimize applied profile={profile.value} "
+        f"size_before={size_before} size_after={size_after}"
+    )
+    store.save(record)
+    return final
+
+
 def _cleanup_intermediates(workspace: Path) -> None:
     """Remove bulky intermediates; keep JSON plans/reports if present."""
     for name in ("align", "reconstruct", "fine-warp"):
@@ -239,13 +309,16 @@ def default_idempotency_key(
     *,
     use_video: bool,
     fine_warp: bool,
+    optimize_after_mux: bool | None = None,
 ) -> str:
     """Stable key for identical graft submissions."""
+    opt = "default" if optimize_after_mux is None else str(int(optimize_after_mux))
     parts = [
         str(Path(base).resolve()),
         str(Path(donor).resolve()),
         str(Path(output).resolve()),
         f"video={int(use_video)}",
         f"fine={int(fine_warp)}",
+        f"optimize={opt}",
     ]
     return "|".join(parts)

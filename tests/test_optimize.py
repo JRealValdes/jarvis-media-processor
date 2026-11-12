@@ -17,6 +17,7 @@ from jarvis_media_processor.output import (
     optimize_mkv,
     parse_language_list,
     select_streams,
+    should_optimize_output,
 )
 from jarvis_media_processor.testing import requires_ffmpeg
 
@@ -44,6 +45,116 @@ def _media(*streams: StreamInfo) -> MediaInfo:
         video_streams=[s for s in streams if s.kind == StreamKind.VIDEO],
         audio_streams=[s for s in streams if s.kind == StreamKind.AUDIO],
     )
+
+
+def test_should_optimize_disabled() -> None:
+    path = Path("missing-but-unused.mkv")
+    info = _media(_stream(0, StreamKind.VIDEO, codec_name="h264"))
+    decision = should_optimize_output(
+        path,
+        info,
+        enabled=False,
+        size_threshold_bytes=1,
+        skip_efficient_max_bitrate_bps=15_000_000,
+    )
+    assert decision.should_run is False
+    assert "disabled" in decision.reason
+
+
+def test_should_optimize_skips_under_threshold(tmp_path: Path) -> None:
+    path = tmp_path / "small.mkv"
+    path.write_bytes(b"x" * 100)
+    info = _media(
+        _stream(0, StreamKind.VIDEO, codec_name="h264"),
+        _stream(1, StreamKind.AUDIO, language="eng"),
+    )
+    decision = should_optimize_output(
+        path,
+        info,
+        enabled=True,
+        size_threshold_bytes=1000,
+        skip_efficient_max_bitrate_bps=15_000_000,
+    )
+    assert decision.should_run is False
+    assert "threshold" in decision.reason
+
+
+def test_should_optimize_runs_for_fat_h264(tmp_path: Path) -> None:
+    path = tmp_path / "fat.mkv"
+    path.write_bytes(b"x" * 2000)
+    info = MediaInfo(
+        path=path,
+        format=FormatInfo(duration_seconds=1.0),
+        streams=[
+            _stream(0, StreamKind.VIDEO, codec_name="h264"),
+            _stream(1, StreamKind.AUDIO, language="eng"),
+        ],
+        video_streams=[_stream(0, StreamKind.VIDEO, codec_name="h264")],
+        audio_streams=[_stream(1, StreamKind.AUDIO, language="eng")],
+    )
+    decision = should_optimize_output(
+        path,
+        info,
+        enabled=True,
+        size_threshold_bytes=1000,
+        skip_efficient_max_bitrate_bps=15_000_000,
+    )
+    assert decision.should_run is True
+    assert "h264" in decision.reason
+
+
+def test_should_optimize_skips_efficient_hevc(tmp_path: Path) -> None:
+    path = tmp_path / "hevc.mkv"
+    path.write_bytes(b"x" * 2000)
+    video = StreamInfo(
+        index=0,
+        kind=StreamKind.VIDEO,
+        codec_name="hevc",
+        bitrate=8_000_000,
+    )
+    info = MediaInfo(
+        path=path,
+        format=FormatInfo(duration_seconds=10.0),
+        streams=[video],
+        video_streams=[video],
+        audio_streams=[],
+    )
+    decision = should_optimize_output(
+        path,
+        info,
+        enabled=True,
+        size_threshold_bytes=1000,
+        skip_efficient_max_bitrate_bps=15_000_000,
+    )
+    assert decision.should_run is False
+    assert "efficient" in decision.reason
+
+
+def test_should_optimize_runs_for_fat_hevc_remux(tmp_path: Path) -> None:
+    path = tmp_path / "hevc-fat.mkv"
+    path.write_bytes(b"x" * 2000)
+    video = StreamInfo(
+        index=0,
+        kind=StreamKind.VIDEO,
+        codec_name="hevc",
+        bitrate=40_000_000,
+    )
+    info = MediaInfo(
+        path=path,
+        format=FormatInfo(duration_seconds=10.0),
+        streams=[video],
+        video_streams=[video],
+        audio_streams=[],
+    )
+    decision = should_optimize_output(
+        path,
+        info,
+        enabled=True,
+        size_threshold_bytes=1000,
+        skip_efficient_max_bitrate_bps=15_000_000,
+    )
+    assert decision.should_run is True
+    assert "warrants" in decision.reason
 
 
 def test_parse_language_list_none_keeps_all() -> None:

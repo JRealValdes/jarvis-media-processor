@@ -39,6 +39,16 @@ def job_submit(
         bool,
         typer.Option("--skip-fine-warp", help="Mux reconstructed WAV without fine-warp."),
     ] = False,
+    no_optimize: Annotated[
+        bool,
+        typer.Option(
+            "--no-optimize",
+            help=(
+                "Disable post-mux optimize even when the output exceeds the size "
+                "threshold (overrides JMP_JOBS_OPTIMIZE_AFTER_MUX)."
+            ),
+        ),
+    ] = False,
     idempotency_key: Annotated[
         str | None,
         typer.Option(
@@ -78,6 +88,7 @@ def job_submit(
             output,
             use_video=not no_video,
             fine_warp=not skip_fine_warp,
+            optimize_after_mux=False if no_optimize else None,
             donor_language=donor_language,
             donor_title=donor_title,
             idempotency_key=idempotency_key,

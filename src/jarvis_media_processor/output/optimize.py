@@ -31,6 +31,18 @@ class OptimizeSpecError(ValueError):
     """Invalid optimize CLI/API specification."""
 
 
+# Modern codecs where a second lossy pass only pays off at high bitrates.
+_EFFICIENT_VIDEO_CODECS = frozenset({"hevc", "h265", "av1", "vp9"})
+
+
+@dataclass(frozen=True)
+class OptimizeDecision:
+    """Whether a post-mux optimize pass should run, with a human-readable reason."""
+
+    should_run: bool
+    reason: str
+
+
 @dataclass(frozen=True)
 class SelectedStreams:
     """Stream indices (absolute FFprobe indices) to map into the output."""
@@ -87,6 +99,87 @@ def _language_matches(stream_language: str | None, keep: frozenset[str]) -> bool
     if lang is None:
         return False
     return lang in keep
+
+
+def estimate_video_bitrate_bps(info: MediaInfo, file_size_bytes: int) -> int | None:
+    """Best-effort video bitrate in bits/second.
+
+    Prefers the first video stream's tagged bitrate; otherwise derives an
+    average from file size and duration (includes audio/subs — slightly high).
+    """
+    if info.video_streams:
+        tagged = info.video_streams[0].bitrate
+        if tagged is not None and tagged > 0:
+            return int(tagged)
+    duration = info.duration_seconds
+    if duration is not None and duration > 0 and file_size_bytes > 0:
+        return int((file_size_bytes * 8) / duration)
+    if info.format.bitrate is not None and info.format.bitrate > 0:
+        return int(info.format.bitrate)
+    return None
+
+
+def should_optimize_output(
+    path: Path,
+    info: MediaInfo,
+    *,
+    enabled: bool,
+    size_threshold_bytes: int,
+    skip_efficient_max_bitrate_bps: int,
+) -> OptimizeDecision:
+    """Decide whether an archive-quality optimize pass is worth running.
+
+    Runs only when all of the following hold:
+
+    1. ``enabled`` is True (job/settings toggle).
+    2. File size is strictly greater than ``size_threshold_bytes``.
+    3. There is a video stream.
+    4. Either the codec is not already modern (HEVC/AV1/VP9), or it is modern
+       but still above ``skip_efficient_max_bitrate_bps`` (fat remux / 4K).
+
+    This avoids a quality-losing second HEVC pass on files that are already
+    efficiently encoded near the size target.
+    """
+    if not enabled:
+        return OptimizeDecision(False, "optimize_after_mux disabled")
+    if not path.is_file():
+        return OptimizeDecision(False, f"output missing: {path}")
+
+    size = path.stat().st_size
+    if size <= size_threshold_bytes:
+        return OptimizeDecision(
+            False,
+            f"size {size} bytes <= threshold {size_threshold_bytes} bytes",
+        )
+    if not info.video_streams:
+        return OptimizeDecision(False, "no video stream")
+
+    raw_codec = (info.video_streams[0].codec_name or "unknown").lower()
+    codec = "hevc" if raw_codec == "h265" else raw_codec
+    bitrate = estimate_video_bitrate_bps(info, size)
+
+    if codec in _EFFICIENT_VIDEO_CODECS:
+        if bitrate is not None and bitrate <= skip_efficient_max_bitrate_bps:
+            return OptimizeDecision(
+                False,
+                (
+                    f"already efficient {codec} at {bitrate} bps "
+                    f"(<= {skip_efficient_max_bitrate_bps}); skip re-encode"
+                ),
+            )
+        br_label = str(bitrate) if bitrate is not None else "unknown"
+        return OptimizeDecision(
+            True,
+            (
+                f"size {size} over threshold; {codec} bitrate {br_label} bps "
+                f"warrants archive re-encode"
+            ),
+        )
+
+    return OptimizeDecision(
+        True,
+        f"size {size} over threshold; codec {codec} benefits from HEVC archive",
+    )
 
 
 def select_streams(

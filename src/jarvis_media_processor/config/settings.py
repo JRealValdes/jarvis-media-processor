@@ -300,6 +300,33 @@ class Settings(BaseSettings):
         default="192k",
         description="Audio bitrate for optimize re-encode profiles (e.g. 192k).",
     )
+    jobs_optimize_after_mux: bool = Field(
+        default=True,
+        description=(
+            "After a successful mux in graft jobs, optionally run optimize when "
+            "the output exceeds JMP_OPTIMIZE_SIZE_THRESHOLD_BYTES and codec gates."
+        ),
+    )
+    optimize_size_threshold_bytes: int = Field(
+        default=6 * 1024 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Minimum output size (bytes) before post-mux optimize is considered "
+            "(default 6 GiB)."
+        ),
+    )
+    optimize_skip_efficient_max_bitrate_bps: int = Field(
+        default=15_000_000,
+        ge=1,
+        description=(
+            "Skip post-mux optimize when video is already HEVC/AV1/VP9 at or below "
+            "this bitrate (bits/s), even if the file exceeds the size threshold."
+        ),
+    )
+    jobs_optimize_profile: str = Field(
+        default="archive",
+        description="Optimize profile used by post-mux job step (archive|balanced|...).",
+    )
 
     # Processing report / manual-review thresholds
     report_low_confidence: float = Field(

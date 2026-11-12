@@ -51,6 +51,7 @@ class JobParams(BaseModel):
     output_path: Path
     use_video: bool = True
     fine_warp: bool = True
+    optimize_after_mux: bool | None = None
     donor_language: str = "spa"
     donor_title: str = "Spanish (reconstructed)"
     idempotency_key: str | None = None

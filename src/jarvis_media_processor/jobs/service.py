@@ -17,6 +17,7 @@ def submit_and_run(
     *,
     use_video: bool = True,
     fine_warp: bool = True,
+    optimize_after_mux: bool | None = None,
     donor_language: str = "spa",
     donor_title: str = "Spanish (reconstructed)",
     idempotency_key: str | None = None,
@@ -31,7 +32,12 @@ def submit_and_run(
     key = idempotency_key
     if key is None and auto_idempotency:
         key = default_idempotency_key(
-            base, donor, output, use_video=use_video, fine_warp=fine_warp
+            base,
+            donor,
+            output,
+            use_video=use_video,
+            fine_warp=fine_warp,
+            optimize_after_mux=optimize_after_mux,
         )
     params = JobParams(
         base_path=Path(base),
@@ -39,6 +45,7 @@ def submit_and_run(
         output_path=Path(output),
         use_video=use_video,
         fine_warp=fine_warp,
+        optimize_after_mux=optimize_after_mux,
         donor_language=donor_language,
         donor_title=donor_title,
         idempotency_key=key,
