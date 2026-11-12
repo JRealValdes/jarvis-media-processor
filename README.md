@@ -179,8 +179,8 @@ Profiles:
 
 | Profile | Video | Audio |
 |---------|-------|-------|
-| `archive` | HEVC (`libx265`) CRF ~18 | re-encode (`JMP_OPTIMIZE_AUDIO_*`) |
-| `balanced` | HEVC CRF ~21 (default) | re-encode |
+| `archive` | HEVC (`libx265`) CRF ~18 (default) | re-encode (`JMP_OPTIMIZE_AUDIO_*`) |
+| `balanced` | HEVC CRF ~21 | re-encode |
 | `audio-slim` | stream copy | re-encode only |
 | `remux` | stream copy | stream copy (drop unwanted tracks) |
 

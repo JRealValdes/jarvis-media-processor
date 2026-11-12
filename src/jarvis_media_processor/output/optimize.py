@@ -202,7 +202,7 @@ def optimize_mkv(
     source_path: Path | str,
     output_path: Path | str,
     *,
-    profile: OptimizeProfile | str = OptimizeProfile.BALANCED,
+    profile: OptimizeProfile | str = OptimizeProfile.ARCHIVE,
     keep_audio: frozenset[str] | str | None = None,
     keep_subs: frozenset[str] | str | None = None,
     settings: Settings | None = None,

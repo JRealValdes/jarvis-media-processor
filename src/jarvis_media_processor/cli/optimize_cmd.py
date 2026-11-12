@@ -30,11 +30,12 @@ def optimize_command(
             "--profile",
             "-p",
             help=(
-                "Quality/size profile: archive (HEVC CRF~18), balanced (HEVC CRF~21), "
-                "audio-slim (video copy + audio re-encode), remux (stream copy + drop)."
+                "Quality/size profile: archive (HEVC CRF~18, default), "
+                "balanced (HEVC CRF~21), audio-slim (video copy + audio re-encode), "
+                "remux (stream copy + drop)."
             ),
         ),
-    ] = OptimizeProfile.BALANCED,
+    ] = OptimizeProfile.ARCHIVE,
     keep_audio: Annotated[
         str | None,
         typer.Option(
