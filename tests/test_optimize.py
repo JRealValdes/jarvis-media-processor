@@ -265,6 +265,8 @@ def test_build_optimize_command_balanced_uses_x265() -> None:
     assert cmd[cmd.index("-preset") + 1] == "fast"
     assert cmd[cmd.index("-c:a") + 1] == "libopus"
     assert cmd[cmd.index("-b:a") + 1] == "160k"
+    assert "aformat=channel_layouts=7.1|5.1|stereo|mono" in cmd
+    assert cmd[cmd.index("-mapping_family") + 1] == "1"
 
 
 def test_build_optimize_command_archive_crf() -> None:
@@ -305,6 +307,7 @@ def test_build_optimize_command_audio_slim() -> None:
     )
     assert cmd[cmd.index("-c:v") + 1] == "copy"
     assert cmd[cmd.index("-c:a") + 1] == "libopus"
+    assert "-mapping_family" in cmd
 
 
 def _write_tiny_srt(path: Path, text: str = "Hello") -> None:

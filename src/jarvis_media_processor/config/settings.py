@@ -297,8 +297,11 @@ class Settings(BaseSettings):
         description="Audio encoder for archive/balanced/audio-slim optimize profiles.",
     )
     optimize_audio_bitrate: str = Field(
-        default="192k",
-        description="Audio bitrate for optimize re-encode profiles (e.g. 192k).",
+        default="384k",
+        description=(
+            "Audio bitrate for optimize re-encode profiles "
+            "(384k suits 5.1 Opus/AAC better than stereo-oriented 192k)."
+        ),
     )
     jobs_optimize_after_mux: bool = Field(
         default=True,

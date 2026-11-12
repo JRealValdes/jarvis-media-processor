@@ -231,7 +231,7 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 | `JMP_OPTIMIZE_BALANCED_CRF` | `21` | libx265 CRF for `balanced` |
 | `JMP_OPTIMIZE_X265_PRESET` | `medium` | libx265 preset |
 | `JMP_OPTIMIZE_AUDIO_CODEC` | `libopus` | Audio encoder for non-`remux` profiles |
-| `JMP_OPTIMIZE_AUDIO_BITRATE` | `192k` | Audio bitrate for those profiles |
+| `JMP_OPTIMIZE_AUDIO_BITRATE` | `384k` | Audio bitrate for those profiles (5.1-friendly) |
 | `JMP_JOBS_OPTIMIZE_AFTER_MUX` | `true` | Consider post-mux optimize in graft jobs |
 | `JMP_OPTIMIZE_SIZE_THRESHOLD_BYTES` | `6442450944` | Size gate (6 GiB) before post-mux optimize |
 | `JMP_OPTIMIZE_SKIP_EFFICIENT_MAX_BITRATE_BPS` | `15000000` | Skip if already HEVC/AV1/VP9 at/below this bitrate |

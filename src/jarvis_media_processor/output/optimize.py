@@ -243,12 +243,23 @@ def _video_encode_args(profile: OptimizeProfile, settings: Settings) -> list[str
 def _audio_encode_args(profile: OptimizeProfile, settings: Settings) -> list[str]:
     if profile is OptimizeProfile.REMUX:
         return ["-c:a", "copy"]
-    return [
+    args = [
         "-c:a",
         settings.optimize_audio_codec,
         "-b:a",
         settings.optimize_audio_bitrate,
     ]
+    # libopus rejects layouts like 5.1(side); rematrix + mapping_family fix it.
+    if settings.optimize_audio_codec in {"libopus", "opus"}:
+        args.extend(
+            [
+                "-af",
+                "aformat=channel_layouts=7.1|5.1|stereo|mono",
+                "-mapping_family",
+                "1",
+            ]
+        )
+    return args
 
 
 def build_optimize_command(
