@@ -171,6 +171,29 @@ uv run jmp mux path/to/base.mkv path/to/donor_on_base_fine.wav -o out.mkv \
   --donor-language spa --donor-title "Spanish (reconstructed)"
 ```
 
+### Optimize / compress
+
+Shrink an already-complete multi-track MKV (e.g. a remux that has the languages you want but is too large). Soft subtitles stay selectable — never burned in.
+
+Profiles:
+
+| Profile | Video | Audio |
+|---------|-------|-------|
+| `archive` | HEVC (`libx265`) CRF ~18 | re-encode (`JMP_OPTIMIZE_AUDIO_*`) |
+| `balanced` | HEVC CRF ~21 (default) | re-encode |
+| `audio-slim` | stream copy | re-encode only |
+| `remux` | stream copy | stream copy (drop unwanted tracks) |
+
+```bash
+uv run jmp optimize path/to/big.mkv -o path/to/smaller.mkv
+uv run jmp optimize path/to/big.mkv -o out.mkv --profile archive
+uv run jmp optimize path/to/big.mkv -o out.mkv --profile remux \
+  --keep-audio spa,eng --keep-subs spa,eng
+uv run jmp optimize path/to/big.mkv -o out.mkv --dry-run
+```
+
+Omit `--keep-audio` / `--keep-subs` to keep every track of that kind. CRF and audio encoder defaults are under `JMP_OPTIMIZE_*` (see `.env.example`).
+
 ## Development
 
 ```bash
@@ -201,6 +224,11 @@ Settings live in `jarvis_media_processor.config.settings.Settings` and are loade
 | `JMP_SCHEDULE_RETRY_FAILED` | `false` | Re-queue failed pairs on schedule ticks |
 | `JMP_FFMPEG_PATH` | `ffmpeg` | FFmpeg executable |
 | `JMP_FFPROBE_PATH` | `ffprobe` | FFprobe executable |
+| `JMP_OPTIMIZE_ARCHIVE_CRF` | `18` | libx265 CRF for `jmp optimize --profile archive` |
+| `JMP_OPTIMIZE_BALANCED_CRF` | `21` | libx265 CRF for `balanced` |
+| `JMP_OPTIMIZE_X265_PRESET` | `medium` | libx265 preset |
+| `JMP_OPTIMIZE_AUDIO_CODEC` | `libopus` | Audio encoder for non-`remux` profiles |
+| `JMP_OPTIMIZE_AUDIO_BITRATE` | `192k` | Audio bitrate for those profiles |
 | `JMP_FINE_WARP_*` | (see Settings) | Dense residual lag field after reconstruct — [docs/fine-warp.md](docs/fine-warp.md) |
 
 ## Package layout
@@ -214,7 +242,7 @@ src/jarvis_media_processor/
   video/         # Frame matching / activity
   alignment/     # Sync model + curve walk
   reconstruct/   # Donor on base timeline + fine-warp
-  output/        # MKV mux
+  output/        # MKV mux + optimize/compress
   report/        # Processing reports / validation
   jobs/          # Standalone job runner + store
   batch/         # Folder pairing + batch enqueue

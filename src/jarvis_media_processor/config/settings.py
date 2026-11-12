@@ -275,6 +275,32 @@ class Settings(BaseSettings):
         description="Low-pass corner before onset envelope.",
     )
 
+    # Optimize / compress oversized multi-track MKVs
+    optimize_archive_crf: int = Field(
+        default=18,
+        ge=0,
+        le=51,
+        description="libx265 CRF for the archive optimize profile (near-transparent).",
+    )
+    optimize_balanced_crf: int = Field(
+        default=21,
+        ge=0,
+        le=51,
+        description="libx265 CRF for the balanced optimize profile.",
+    )
+    optimize_x265_preset: str = Field(
+        default="medium",
+        description="libx265 preset for archive/balanced optimize profiles.",
+    )
+    optimize_audio_codec: str = Field(
+        default="libopus",
+        description="Audio encoder for archive/balanced/audio-slim optimize profiles.",
+    )
+    optimize_audio_bitrate: str = Field(
+        default="192k",
+        description="Audio bitrate for optimize re-encode profiles (e.g. 192k).",
+    )
+
     # Processing report / manual-review thresholds
     report_low_confidence: float = Field(
         default=0.45,

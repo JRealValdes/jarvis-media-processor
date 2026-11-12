@@ -17,6 +17,7 @@ from jarvis_media_processor.cli.inspect_cmd import inspect_command
 from jarvis_media_processor.cli.job_cmd import job_app
 from jarvis_media_processor.cli.match_visual_cmd import match_visual_command
 from jarvis_media_processor.cli.mux_cmd import mux_command
+from jarvis_media_processor.cli.optimize_cmd import optimize_command
 from jarvis_media_processor.cli.reconstruct_cmd import reconstruct_command
 from jarvis_media_processor.cli.schedule_cmd import schedule_app
 from jarvis_media_processor.config import get_settings
@@ -37,6 +38,7 @@ app.command("align")(align_command)
 app.command("reconstruct")(reconstruct_command)
 app.command("fine-warp")(fine_warp_command)
 app.command("mux")(mux_command)
+app.command("optimize")(optimize_command)
 app.add_typer(job_app, name="job")
 app.add_typer(batch_app, name="batch")
 app.add_typer(schedule_app, name="schedule")
